@@ -3,6 +3,7 @@ require("dotenv").config();
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const http = require("node:http");
 const {
   ActionRowBuilder,
   ActivityType,
@@ -3947,8 +3948,17 @@ if (!DISCORD_TOKEN) {
   throw new Error("Сначала укажите DISCORD_TOKEN в .env.");
 }
 
+function startHealthServer() {
+  const port = Number(process.env.PORT) || 3000;
+  http.createServer((req, res) => {
+    const ok = client.isReady();
+    res.writeHead(ok ? 200 : 503).end(ok ? "OK" : "NOT READY");
+  }).listen(port, () => console.log(`Health check listening on :${port}`));
+}
+
 async function startBot() {
   await initStorage();
+  startHealthServer();
   await client.login(DISCORD_TOKEN);
 }
 
