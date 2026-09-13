@@ -2141,7 +2141,7 @@ async function handleClientReady(readyClient) {
 
   // Periodically (rather than before every single interaction) pick up data changed
   // directly in the database, so manual edits still apply without a restart but without
-  // adding a blocking MySQL round-trip in front of every button/command's 3-second ack window.
+  // adding a blocking PostgreSQL round-trip in front of every button/command's 3-second ack window.
   const storageReloadSweep = setInterval(() => {
     reloadStorage().catch((error) => {
       console.error("Background storage reload failed:", error);
@@ -3953,8 +3953,8 @@ async function startBot() {
 }
 
 async function shutdown(signal) {
-  console.log(`Received ${signal}, closing MySQL storage.`);
-  await closeStorage().catch((error) => console.error("Failed to close MySQL storage:", error));
+  console.log(`Received ${signal}, closing PostgreSQL storage.`);
+  await closeStorage().catch((error) => console.error("Failed to close PostgreSQL storage:", error));
   client.destroy();
   process.exit(0);
 }

@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const mysql = require("mysql2/promise");
+const { Pool } = require("pg");
 
 const ROOT = path.join(__dirname, "..");
 
@@ -19,17 +19,15 @@ let writeQueue = Promise.resolve();
 let reloadQueue = Promise.resolve();
 let lastWriteError = null;
 
-function mysqlDate(value) {
+function pgTimestamp(value) {
   if (!value) return null;
-  const date = new Date(value);
-  return Number.isFinite(date.getTime())
-    ? date.toISOString().slice(0, 23).replace("T", " ")
-    : null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
 }
 
 function isoDate(value) {
   if (!value) return null;
-  const date = new Date(value);
+  const date = value instanceof Date ? value : new Date(value);
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
@@ -58,56 +56,54 @@ function queueWrite(label, operation) {
     },
     (error) => {
       lastWriteError = error;
-      console.error(`MySQL write failed (${label}):`, error);
+      console.error(`Postgres write failed (${label}):`, error);
     }
   );
   return operationPromise;
 }
 
 async function replaceRows(table, insertRows, where = null) {
-  const connection = await pool.getConnection();
+  const client = await pool.connect();
   try {
-    await connection.beginTransaction();
+    await client.query("BEGIN");
     if (where) {
-      await connection.query(`DELETE FROM \`${table}\` WHERE ${where.sql}`, where.params);
+      await client.query(`DELETE FROM ${table} WHERE ${where.sql}`, where.params);
     } else {
-      await connection.query(`DELETE FROM \`${table}\``);
+      await client.query(`DELETE FROM ${table}`);
     }
-    await insertRows(connection);
-    await connection.commit();
+    await insertRows(client);
+    await client.query("COMMIT");
   } catch (error) {
-    await connection.rollback();
+    await client.query("ROLLBACK");
     throw error;
   } finally {
-    connection.release();
+    client.release();
   }
 }
 
 async function initStorage() {
-  const required = ["MYSQL_HOST", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DBNAME"];
+  const required = ["POSTGRES_HOST", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DBNAME"];
   const missing = required.filter((name) => !process.env[name]);
-  if (missing.length) throw new Error(`Не заданы переменные MySQL: ${missing.join(", ")}`);
+  if (missing.length) throw new Error(`Не заданы переменные Postgres: ${missing.join(", ")}`);
 
-  // TLS is required and pinned to a specific CA (e.g. the Timeweb Cloud MySQL cert) only when
-  // MYSQL_SSL_CA_PATH is explicitly set. Providers reachable only over a private/internal network
-  // (e.g. Railway's <service>.railway.internal) neither offer nor need that — leave it unset there.
-  const sslCaPath = process.env.MYSQL_SSL_CA_PATH
-    ? path.resolve(ROOT, process.env.MYSQL_SSL_CA_PATH)
+  // TLS is required and pinned to a specific CA only when POSTGRES_SSL_CA_PATH is explicitly
+  // set. Providers reachable only over a private/internal network (e.g. Railway's
+  // <service>.railway.internal) neither offer nor need that — leave it unset there.
+  const sslCaPath = process.env.POSTGRES_SSL_CA_PATH
+    ? path.resolve(ROOT, process.env.POSTGRES_SSL_CA_PATH)
     : null;
   if (sslCaPath && !fs.existsSync(sslCaPath)) {
     throw new Error(`Не найден TLS-сертификат: ${sslCaPath}`);
   }
 
   const poolOptions = {
-      host: process.env.MYSQL_HOST,
-      port: Number(process.env.MYSQL_PORT || 3306),
-      user: process.env.MYSQL_USER,
-      password: process.env.MYSQL_PASSWORD,
-      database: process.env.MYSQL_DBNAME,
-      charset: "utf8mb4",
-      waitForConnections: true,
-      connectionLimit: 5,
-      connectTimeout: 15000,
+      host: process.env.POSTGRES_HOST,
+      port: Number(process.env.POSTGRES_PORT || 5432),
+      user: process.env.POSTGRES_USER,
+      password: process.env.POSTGRES_PASSWORD,
+      database: process.env.POSTGRES_DBNAME,
+      max: 5,
+      connectionTimeoutMillis: 15000,
       ...(sslCaPath
         ? { ssl: { ca: fs.readFileSync(sslCaPath, "utf8"), rejectUnauthorized: true } }
         : {})
@@ -117,12 +113,14 @@ async function initStorage() {
   let lastError;
   for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
     if (retryDelays[attempt]) {
-      console.warn(`MySQL недоступна, повторное подключение через ${retryDelays[attempt] / 1000} сек.`);
+      console.warn(`Postgres недоступна, повторное подключение через ${retryDelays[attempt] / 1000} сек.`);
       await new Promise((resolve) => setTimeout(resolve, retryDelays[attempt]));
     }
-    pool = mysql.createPool(poolOptions);
+    pool = new Pool(poolOptions);
+    pool.on("error", (error) => console.error("Postgres pool error:", error));
     try {
-      [[tls]] = await pool.query("SHOW STATUS LIKE 'Ssl_cipher'");
+      const { rows } = await pool.query("SELECT ssl, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()");
+      tls = rows[0];
       lastError = null;
       break;
     } catch (error) {
@@ -132,10 +130,10 @@ async function initStorage() {
     }
   }
   if (lastError) throw lastError;
-  if (sslCaPath && !tls?.Value) throw new Error("MySQL-соединение установлено без TLS");
+  if (sslCaPath && !tls?.cipher) throw new Error("Postgres-соединение установлено без TLS");
   resetState();
   await loadState();
-  console.log(tls?.Value ? `MySQL storage connected with TLS (${tls.Value}).` : "MySQL storage connected (private network, no TLS).");
+  console.log(tls?.cipher ? `Postgres storage connected with TLS (${tls.cipher}).` : "Postgres storage connected (private network, no TLS).");
 }
 
 function resetState() {
@@ -159,7 +157,7 @@ function reloadStorage() {
 }
 
 async function loadState() {
-  const [recruitmentRows] = await pool.query(
+  const { rows: recruitmentRows } = await pool.query(
     "SELECT id, section, recruitment_open, updated_at FROM recruitment_settings ORDER BY id"
   );
   const captSettings = recruitmentRows.find((row) => row.id === 1 || String(row.section).toLowerCase() === "capt");
@@ -171,7 +169,7 @@ async function loadState() {
     rpUpdatedAt: isoDate(rpSettings?.updated_at)
   };
 
-  const [captReplayRows] = await pool.query(
+  const { rows: captReplayRows } = await pool.query(
     "SELECT is_open, opened_at, opened_by, thread_id, open_count, thread_history FROM capt_replay_window WHERE id = 1"
   );
   state.captReplayWindow = {
@@ -183,7 +181,7 @@ async function loadState() {
     threadHistory: parseJsonArray(captReplayRows[0]?.thread_history)
   };
 
-  const [users] = await pool.query("SELECT * FROM users");
+  const { rows: users } = await pool.query("SELECT * FROM users");
   for (const row of users) {
     state.users[row.discord_id] = { dmNotifications: Boolean(row.dm_notifications) };
   }
@@ -191,7 +189,7 @@ async function loadState() {
   // rank_logs and warning_logs are merged into one user_logs table, discriminated
   // by log_type — both are the same shape (who, when, which admin, why), just
   // with a few type-specific columns left null on the other type's rows.
-  const [logRows] = await pool.query("SELECT * FROM user_logs ORDER BY created_at, id");
+  const { rows: logRows } = await pool.query("SELECT * FROM user_logs ORDER BY created_at, id");
   for (const row of logRows) {
     if (row.log_type === "rank") {
       state.ranks[row.user_id] ??= [];
@@ -222,7 +220,7 @@ async function loadState() {
     }
   }
 
-  const [ticketRows] = await pool.query("SELECT * FROM tickets ORDER BY created_at, id");
+  const { rows: ticketRows } = await pool.query("SELECT * FROM tickets ORDER BY created_at, id");
   for (const row of ticketRows) {
     if (row.category === "application") {
       state.applications[row.ticket_key] = {
@@ -277,10 +275,10 @@ function getRankHistory() { return state.ranks; }
 function getSupportTickets() { return state.supportTickets; }
 
 async function getActiveGameAfkSessions() {
-  const [rows] = await pool.query(
+  const { rows } = await pool.query(
     `SELECT user_id, reason, started_at, expires_at
      FROM afk_sessions
-     WHERE expires_at > CURRENT_TIMESTAMP(3)
+     WHERE expires_at > now()
      ORDER BY expires_at, started_at`
   );
   return rows.map((row) => ({
@@ -292,9 +290,9 @@ async function getActiveGameAfkSessions() {
 }
 
 async function getGameAfkSession(userId) {
-  const [rows] = await pool.execute(
+  const { rows } = await pool.query(
     `SELECT user_id, reason, started_at, expires_at
-     FROM afk_sessions WHERE user_id = ? LIMIT 1`,
+     FROM afk_sessions WHERE user_id = $1 LIMIT 1`,
     [String(userId)]
   );
   const row = rows[0];
@@ -307,31 +305,33 @@ async function getGameAfkSession(userId) {
 }
 
 async function saveGameAfkSession({ userId, reason, startedAt, expiresAt }) {
-  await pool.execute(
+  await pool.query(
     `INSERT INTO afk_sessions (user_id, reason, started_at, expires_at, updated_at)
-     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP(3))
-     ON DUPLICATE KEY UPDATE reason = VALUES(reason),
-       started_at = VALUES(started_at), expires_at = VALUES(expires_at),
-       updated_at = CURRENT_TIMESTAMP(3)`,
-    [String(userId), reason, mysqlDate(startedAt), mysqlDate(expiresAt)]
+     VALUES ($1, $2, $3, $4, now())
+     ON CONFLICT (user_id) DO UPDATE SET
+       reason = EXCLUDED.reason,
+       started_at = EXCLUDED.started_at,
+       expires_at = EXCLUDED.expires_at,
+       updated_at = now()`,
+    [String(userId), reason, pgTimestamp(startedAt), pgTimestamp(expiresAt)]
   );
 }
 
 async function removeGameAfkSession(userId) {
-  const connection = await pool.getConnection();
+  const client = await pool.connect();
   try {
-    await connection.beginTransaction();
-    const [rows] = await connection.execute(
+    await client.query("BEGIN");
+    const { rows } = await client.query(
       `SELECT user_id, reason, started_at, expires_at
-       FROM afk_sessions WHERE user_id = ? FOR UPDATE`,
+       FROM afk_sessions WHERE user_id = $1 FOR UPDATE`,
       [String(userId)]
     );
     if (!rows.length) {
-      await connection.commit();
+      await client.query("COMMIT");
       return null;
     }
-    await connection.execute("DELETE FROM afk_sessions WHERE user_id = ?", [String(userId)]);
-    await connection.commit();
+    await client.query("DELETE FROM afk_sessions WHERE user_id = $1", [String(userId)]);
+    await client.query("COMMIT");
     const row = rows[0];
     return {
       userId: row.user_id,
@@ -340,30 +340,28 @@ async function removeGameAfkSession(userId) {
       expiresAt: isoDate(row.expires_at)
     };
   } catch (error) {
-    await connection.rollback();
+    await client.query("ROLLBACK");
     throw error;
   } finally {
-    connection.release();
+    client.release();
   }
 }
 
 async function takeExpiredGameAfkSessions() {
-  const connection = await pool.getConnection();
+  const client = await pool.connect();
   try {
-    await connection.beginTransaction();
-    const [rows] = await connection.query(
+    await client.query("BEGIN");
+    const { rows } = await client.query(
       `SELECT user_id, reason, started_at, expires_at
        FROM afk_sessions
-       WHERE expires_at <= CURRENT_TIMESTAMP(3)
+       WHERE expires_at <= now()
        ORDER BY expires_at
        FOR UPDATE`
     );
     if (rows.length) {
-      await connection.query(
-        "DELETE FROM afk_sessions WHERE expires_at <= CURRENT_TIMESTAMP(3)"
-      );
+      await client.query("DELETE FROM afk_sessions WHERE expires_at <= now()");
     }
-    await connection.commit();
+    await client.query("COMMIT");
     return rows.map((row) => ({
       userId: row.user_id,
       reason: row.reason,
@@ -371,10 +369,10 @@ async function takeExpiredGameAfkSessions() {
       expiresAt: isoDate(row.expires_at)
     }));
   } catch (error) {
-    await connection.rollback();
+    await client.query("ROLLBACK");
     throw error;
   } finally {
-    connection.release();
+    client.release();
   }
 }
 
@@ -389,13 +387,13 @@ function saveBotInfo(info, section = "both") {
       updates.push([2, "RP", Boolean(info.rpRecruitmentOpen)]);
     }
     for (const [id, sectionName, open] of updates) {
-      await pool.execute(
+      await pool.query(
         `INSERT INTO recruitment_settings (id, section, recruitment_open, updated_at)
-         VALUES (?, ?, ?, CURRENT_TIMESTAMP(3))
-         ON DUPLICATE KEY UPDATE
-           section = VALUES(section),
-           recruitment_open = VALUES(recruitment_open),
-           updated_at = CURRENT_TIMESTAMP(3)`,
+         VALUES ($1, $2, $3, now())
+         ON CONFLICT (id) DO UPDATE SET
+           section = EXCLUDED.section,
+           recruitment_open = EXCLUDED.recruitment_open,
+           updated_at = now()`,
         [id, sectionName, open]
       );
     }
@@ -405,20 +403,20 @@ function saveBotInfo(info, section = "both") {
 function saveCaptReplayWindow(window) {
   state.captReplayWindow = window;
   return queueWrite("capt replay window", async () => {
-    await pool.execute(
+    await pool.query(
       `INSERT INTO capt_replay_window (id, is_open, opened_at, opened_by, thread_id, open_count, thread_history, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(3))
-       ON DUPLICATE KEY UPDATE
-         is_open = VALUES(is_open),
-         opened_at = VALUES(opened_at),
-         opened_by = VALUES(opened_by),
-         thread_id = VALUES(thread_id),
-         open_count = VALUES(open_count),
-         thread_history = VALUES(thread_history),
-         updated_at = CURRENT_TIMESTAMP(3)`,
+       VALUES (1, $1, $2, $3, $4, $5, $6, now())
+       ON CONFLICT (id) DO UPDATE SET
+         is_open = EXCLUDED.is_open,
+         opened_at = EXCLUDED.opened_at,
+         opened_by = EXCLUDED.opened_by,
+         thread_id = EXCLUDED.thread_id,
+         open_count = EXCLUDED.open_count,
+         thread_history = EXCLUDED.thread_history,
+         updated_at = now()`,
       [
         Boolean(window.isOpen),
-        mysqlDate(window.openedAt),
+        pgTimestamp(window.openedAt),
         window.openedBy ?? null,
         window.threadId ?? null,
         Number(window.openCount) || 0,
@@ -432,9 +430,9 @@ function saveUserDb(users) {
   state.users = users;
   return queueWrite("users", async () => {
     for (const [userId, user] of Object.entries(users)) {
-      await pool.execute(
-        `INSERT INTO users (discord_id, dm_notifications) VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE dm_notifications = VALUES(dm_notifications)`,
+      await pool.query(
+        `INSERT INTO users (discord_id, dm_notifications) VALUES ($1, $2)
+         ON CONFLICT (discord_id) DO UPDATE SET dm_notifications = EXCLUDED.dm_notifications`,
         [userId, user.dmNotifications !== false]
       );
     }
@@ -443,35 +441,35 @@ function saveUserDb(users) {
 
 function saveRankHistory(history) {
   state.ranks = history;
-  return queueWrite("rank logs", () => replaceRows("user_logs", async (connection) => {
+  return queueWrite("rank logs", () => replaceRows("user_logs", async (client) => {
     for (const [userId, entries] of Object.entries(history)) {
       for (const entry of entries) {
-        await connection.execute(
+        await client.query(
           `INSERT INTO user_logs
            (log_type, user_id, old_rank, new_rank, administrator_id, reason, created_at)
-           VALUES ('rank', ?, ?, ?, ?, ?, ?)`,
+           VALUES ('rank', $1, $2, $3, $4, $5, $6)`,
           [userId,
             Number.isFinite(Number(entry.oldRank)) ? Number(entry.oldRank) : null,
             Number.isFinite(Number(entry.newRank)) ? Number(entry.newRank) : null,
             entry.adminId === "system" ? null : entry.adminId ?? null,
-            entry.reason ?? null, mysqlDate(entry.createdAt)]
+            entry.reason ?? null, pgTimestamp(entry.createdAt)]
         );
       }
       const latest = entries.at(-1);
       if (latest) {
-        await connection.execute(
-          `UPDATE users SET current_rank = ? WHERE discord_id = ?`,
+        await client.query(
+          `UPDATE users SET current_rank = $1 WHERE discord_id = $2`,
           [Number.isFinite(Number(latest.newRank)) ? Number(latest.newRank) : null, userId]
         );
       }
     }
-  }, { sql: "log_type = ?", params: ["rank"] }));
+  }, { sql: "log_type = $1", params: ["rank"] }));
 }
 
 function saveWarnings(warnings) {
   state.warnings = warnings;
-  return queueWrite("warning logs", () => replaceRows("user_logs", async (connection) => {
-    await connection.query("UPDATE users SET active_warnings = 0, total_warnings = 0");
+  return queueWrite("warning logs", () => replaceRows("user_logs", async (client) => {
+    await client.query("UPDATE users SET active_warnings = 0, total_warnings = 0");
     for (const [userId, record] of Object.entries(warnings)) {
       const active = record.active ?? [];
       const history = record.history ?? [];
@@ -488,43 +486,44 @@ function saveWarnings(warnings) {
           activeTimestamps.has(entry.createdAt) &&
           !matchedTimestamps.has(entry.createdAt);
         if (isStillActive) matchedTimestamps.add(entry.createdAt);
-        await connection.execute(
+        await client.query(
           `INSERT INTO user_logs
            (log_type, user_id, warn_action, warning_reason, reason, administrator_id, is_active, created_at)
-           VALUES ('warn', ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES ('warn', $1, $2, $3, $4, $5, $6, $7)`,
           [userId, issued ? "issued" : "removed", entry.warnReason ?? entry.reason ?? null,
             entry.reason ?? null, entry.adminId === "system" ? null : entry.adminId ?? null,
-            isStillActive, mysqlDate(entry.createdAt)]
+            isStillActive, pgTimestamp(entry.createdAt)]
         );
       }
       // Active warnings without a matching history "add" entry (e.g. synced from Discord roles,
       // which are never logged to history) still need their own row.
       for (const warning of active) {
         if (warning.issuedAt && matchedTimestamps.has(warning.issuedAt)) continue;
-        await connection.execute(
+        await client.query(
           `INSERT INTO user_logs
            (log_type, user_id, warn_action, warning_reason, reason, administrator_id, is_active, created_at)
-           VALUES ('warn', ?, 'issued', ?, ?, ?, TRUE, ?)`,
+           VALUES ('warn', $1, 'issued', $2, $3, $4, TRUE, $5)`,
           [userId, warning.reason ?? null, warning.reason ?? null,
             warning.issuedBy === "system" ? null : warning.issuedBy ?? null,
-            mysqlDate(warning.issuedAt)]
+            pgTimestamp(warning.issuedAt)]
         );
       }
-      await connection.execute(
-        `UPDATE users SET active_warnings = ?, total_warnings = ? WHERE discord_id = ?`,
+      await client.query(
+        `UPDATE users SET active_warnings = $1, total_warnings = $2 WHERE discord_id = $3`,
         [active.length, history.filter((entry) => entry.action === "add").length, userId]
       );
     }
-  }, { sql: "log_type = ?", params: ["warn"] }));
+  }, { sql: "log_type = $1", params: ["warn"] }));
 }
 
 async function syncUserProfile(userId, profile) {
   state.users[userId] ??= { dmNotifications: true };
-  await pool.execute(
+  await pool.query(
     `INSERT INTO users (discord_id, username, current_rank)
-     VALUES (?, ?, ?)
-     ON DUPLICATE KEY UPDATE username = VALUES(username),
-       current_rank = VALUES(current_rank),
+     VALUES ($1, $2, $3)
+     ON CONFLICT (discord_id) DO UPDATE SET
+       username = EXCLUDED.username,
+       current_rank = EXCLUDED.current_rank,
        updated_at = users.updated_at`,
     [userId, profile.username ?? null, profile.currentRank ?? null]
   );
@@ -533,19 +532,19 @@ async function syncUserProfile(userId, profile) {
 async function deleteUserProfile(userId) {
   const normalizedUserId = String(userId);
   await flushStorage();
-  const connection = await pool.getConnection();
+  const client = await pool.connect();
   try {
-    await connection.beginTransaction();
-    await connection.execute("DELETE FROM user_logs WHERE user_id = ?", [normalizedUserId]);
-    await connection.execute("DELETE FROM tickets WHERE user_id = ?", [normalizedUserId]);
-    await connection.execute("DELETE FROM afk_sessions WHERE user_id = ?", [normalizedUserId]);
-    await connection.execute("DELETE FROM users WHERE discord_id = ?", [normalizedUserId]);
-    await connection.commit();
+    await client.query("BEGIN");
+    await client.query("DELETE FROM user_logs WHERE user_id = $1", [normalizedUserId]);
+    await client.query("DELETE FROM tickets WHERE user_id = $1", [normalizedUserId]);
+    await client.query("DELETE FROM afk_sessions WHERE user_id = $1", [normalizedUserId]);
+    await client.query("DELETE FROM users WHERE discord_id = $1", [normalizedUserId]);
+    await client.query("COMMIT");
   } catch (error) {
-    await connection.rollback();
+    await client.query("ROLLBACK");
     throw error;
   } finally {
-    connection.release();
+    client.release();
   }
 
   delete state.users[normalizedUserId];
@@ -561,35 +560,35 @@ async function deleteUserProfile(userId) {
 
 function replaceTicketCategory(category, insertRows) {
   return queueWrite(`tickets:${category}`, async () => {
-    const connection = await pool.getConnection();
+    const client = await pool.connect();
     try {
-      await connection.beginTransaction();
-      await connection.execute("DELETE FROM tickets WHERE category = ?", [category]);
-      await insertRows(connection);
-      await connection.commit();
+      await client.query("BEGIN");
+      await client.query("DELETE FROM tickets WHERE category = $1", [category]);
+      await insertRows(client);
+      await client.query("COMMIT");
     } catch (error) {
-      await connection.rollback();
+      await client.query("ROLLBACK");
       throw error;
     } finally {
-      connection.release();
+      client.release();
     }
   });
 }
 
 function saveApplications(applications) {
   state.applications = applications;
-  return replaceTicketCategory("application", async (connection) => {
+  return replaceTicketCategory("application", async (client) => {
     for (const [applicationKey, application] of Object.entries(applications)) {
       const characterParts = String(application.characterInfo ?? "")
         .split("/")
         .map((part) => part.trim());
-      await connection.execute(
+      await client.query(
          `INSERT INTO tickets
          (category, ticket_key, uid, user_id, status, request_type, ic_name, character_level,
           character_static_id, capt_role, ooc_age, details, claimed_by, decided_by, decision_reason,
           channel_id, message_id, announcement_channel_id, announcement_message_id,
           created_at, updated_at, closed_at)
-         VALUES ('application', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES ('application', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
         [applicationKey, application.uid ?? null, application.userId,
           application.status ?? "new", application.requestType ?? "rp", characterParts[0] || null,
           characterParts[1] || null, characterParts[2] || null, application.captRole ?? null,
@@ -601,8 +600,8 @@ function saveApplications(applications) {
           application.channelId ?? null, application.messageId ?? null,
           application.announcementChannelId ?? null,
           application.announcementMessageId ?? null,
-          mysqlDate(application.createdAt), mysqlDate(application.updatedAt),
-          mysqlDate(application.closedAt)]
+          pgTimestamp(application.createdAt), pgTimestamp(application.updatedAt),
+          pgTimestamp(application.closedAt)]
       );
     }
   });
@@ -610,21 +609,21 @@ function saveApplications(applications) {
 
 function saveSupportTickets(tickets) {
   state.supportTickets = tickets;
-  return replaceTicketCategory("support", async (connection) => {
+  return replaceTicketCategory("support", async (client) => {
     for (const [ticketId, ticket] of Object.entries(tickets)) {
-      await connection.execute(
+      await client.query(
         `INSERT INTO tickets
          (category, ticket_key, uid, user_id, status, request_type, details,
           claimed_by, decided_by, decision_reason, channel_id, message_id,
           created_at, updated_at, closed_at)
-         VALUES ('support', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES ('support', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
         [ticket.id ?? ticketId, ticket.uid ?? null, ticket.userId,
           ticket.status ?? "new", ticket.requestType ?? null, ticket.details ?? null,
           ticket.claimedBy ?? null,
           ticket.closedBy ?? null,
           ticket.decisionReason ?? null, ticket.channelId ?? null,
-          ticket.messageId ?? null, mysqlDate(ticket.createdAt),
-          mysqlDate(ticket.updatedAt), mysqlDate(ticket.closedAt)]
+          ticket.messageId ?? null, pgTimestamp(ticket.createdAt),
+          pgTimestamp(ticket.updatedAt), pgTimestamp(ticket.closedAt)]
       );
     }
   });
