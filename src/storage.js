@@ -178,7 +178,8 @@ async function loadState() {
       applicationsChannelId: row.applications_channel_id,
       applicationPanelChannelId: row.application_panel_channel_id,
       supportPanelChannelId: row.support_panel_channel_id,
-      adminPanelChannelId: row.admin_panel_channel_id
+      adminPanelChannelId: row.admin_panel_channel_id,
+      departmentsEnabled: row.departments_enabled
     };
   }
 
@@ -281,7 +282,8 @@ const EMPTY_GUILD_CONFIG = {
   applicationsChannelId: null,
   applicationPanelChannelId: null,
   supportPanelChannelId: null,
-  adminPanelChannelId: null
+  adminPanelChannelId: null,
+  departmentsEnabled: true
 };
 // A guild with no row yet (bot just joined, dashboard not configured) gets
 // an empty-but-shaped config rather than undefined, so callers can always
@@ -315,7 +317,8 @@ const GUILD_CONFIG_COLUMNS = {
   applicationsChannelId: "applications_channel_id",
   applicationPanelChannelId: "application_panel_channel_id",
   supportPanelChannelId: "support_panel_channel_id",
-  adminPanelChannelId: "admin_panel_channel_id"
+  adminPanelChannelId: "admin_panel_channel_id",
+  departmentsEnabled: "departments_enabled"
 };
 
 // Partial update - only the keys present in `patch` are touched, so the
@@ -457,6 +460,75 @@ async function addBanForGuild(guildId, { discordUserId, characterName, reason, i
 
 async function removeBanForGuild(guildId, banId) {
   await pool.query(`DELETE FROM bans WHERE guild_id = $1 AND id = $2`, [guildId, banId]);
+}
+
+function departmentRowToApi(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    memberDiscordIds: row.member_discord_ids ?? [],
+    recruitmentOpen: row.recruitment_open
+  };
+}
+
+async function getDepartmentsForGuild(guildId) {
+  const { rows } = await pool.query(
+    `SELECT id, name, member_discord_ids, recruitment_open FROM guild_departments WHERE guild_id = $1 ORDER BY id`,
+    [guildId]
+  );
+  return rows.map(departmentRowToApi);
+}
+
+async function getDepartmentById(guildId, departmentId) {
+  const { rows } = await pool.query(
+    `SELECT id, name, member_discord_ids, recruitment_open FROM guild_departments WHERE guild_id = $1 AND id = $2`,
+    [guildId, departmentId]
+  );
+  return rows[0] ? departmentRowToApi(rows[0]) : null;
+}
+
+async function createDepartmentForGuild(guildId, name) {
+  const { rows } = await pool.query(
+    `INSERT INTO guild_departments (guild_id, name) VALUES ($1, $2) RETURNING id, name, member_discord_ids, recruitment_open`,
+    [guildId, name]
+  );
+  return departmentRowToApi(rows[0]);
+}
+
+async function deleteDepartmentForGuild(guildId, departmentId) {
+  await pool.query(`DELETE FROM guild_departments WHERE guild_id = $1 AND id = $2`, [guildId, departmentId]);
+}
+
+async function updateDepartmentForGuild(guildId, departmentId, { memberDiscordIds, recruitmentOpen }) {
+  const setClauses = [];
+  const params = [guildId, departmentId];
+  if (memberDiscordIds !== undefined) {
+    params.push(memberDiscordIds);
+    setClauses.push(`member_discord_ids = $${params.length}`);
+  }
+  if (recruitmentOpen !== undefined) {
+    params.push(recruitmentOpen);
+    setClauses.push(`recruitment_open = $${params.length}`);
+  }
+  if (!setClauses.length) return getDepartmentById(guildId, departmentId);
+  const { rows } = await pool.query(
+    `UPDATE guild_departments SET ${setClauses.join(", ")} WHERE guild_id = $1 AND id = $2
+     RETURNING id, name, member_discord_ids, recruitment_open`,
+    params
+  );
+  return rows[0] ? departmentRowToApi(rows[0]) : null;
+}
+
+// Called when an application into a department is accepted - appends
+// without needing the caller to read-modify-write the member list itself
+// (and without racing a concurrent accept in the same department).
+async function addMemberToDepartment(guildId, departmentId, discordUserId) {
+  await pool.query(
+    `UPDATE guild_departments
+     SET member_discord_ids = array_append(member_discord_ids, $3)
+     WHERE guild_id = $1 AND id = $2 AND NOT ($3 = ANY(member_discord_ids))`,
+    [guildId, departmentId, discordUserId]
+  );
 }
 
 function getApplications() { return state.applications; }
@@ -807,7 +879,10 @@ async function closeStorage() {
 
 module.exports = {
   addBanForGuild,
+  addMemberToDepartment,
   closeStorage,
+  createDepartmentForGuild,
+  deleteDepartmentForGuild,
   deleteUserProfile,
   flushStorage,
   getActiveGameAfkSessions,
@@ -816,6 +891,8 @@ module.exports = {
   getAuditLogForGuild,
   getBansForGuild,
   getBotInfo,
+  getDepartmentById,
+  getDepartmentsForGuild,
   getGameAfkSession,
   getGuildConfig,
   getGuildMembersForApi,
@@ -837,6 +914,7 @@ module.exports = {
   saveWarnings,
   syncUserProfile,
   takeExpiredGameAfkSessions,
+  updateDepartmentForGuild,
   updateGuildConfig,
   upsertGuild
 };

@@ -30,12 +30,14 @@ const {
 } = require("discord.js");
 const { globalCommands: slashCommandDefinitions } = require("./register-commands");
 const {
+  addMemberToDepartment,
   closeStorage,
   deleteUserProfile,
   flushStorage,
   getActiveGameAfkSessions,
   getApplications,
-  getBotInfo,
+  getDepartmentById,
+  getDepartmentsForGuild,
   getGameAfkSession,
   getGuildConfig,
   getRankHistory,
@@ -46,7 +48,6 @@ const {
   reloadStorage,
   removeGameAfkSession,
   saveApplications,
-  saveBotInfo,
   saveGameAfkSession,
   saveRankHistory,
   saveSupportTickets,
@@ -54,6 +55,7 @@ const {
   saveWarnings,
   syncUserProfile,
   takeExpiredGameAfkSessions,
+  updateDepartmentForGuild,
   upsertGuild
 } = require("./storage");
 
@@ -344,10 +346,6 @@ function isApplicationReviewer(member) {
 
 function isSupportReviewer(member) {
   return Boolean(member?.permissions?.has(PermissionFlagsBits.Administrator)) || isLeadership(member);
-}
-
-function applicationSectionLabel(section) {
-  return section === "capt" ? "Капт-состав" : "RP-состав";
 }
 
 function applicantLockedOverwriteOptions() {
@@ -839,7 +837,7 @@ function buildApplicationMessagePayload(application, user = null) {
       new TextDisplayBuilder().setContent(
         `## ${applicationTitle(application)}\n` +
         `Статус: **${applicationStatusLabel(application.status)}**\n` +
-        `Состав: **${applicationSectionLabel(application.requestType)}**`
+        `Состав: **${application.departmentName ?? "Общая заявка"}**`
       )
     )
     .addSeparatorComponents(
@@ -851,7 +849,6 @@ function buildApplicationMessagePayload(application, user = null) {
         `**Discord ID:** ${application.userId}\n` +
         `**IC имя / уровень / Static ID:** ${value(application.characterInfo)}\n` +
         `**OOC возраст:** ${value(application.oocAge)}\n` +
-        (application.requestType === "capt" ? `**Кем хочет быть:** ${value(application.captRole)}\n` : "") +
         `**Почему хочет вступить:** ${value(application.reason)}\n` +
         `**Ссылка на скриншот со списком персонажей:** ${value(application.charactersLink)}`
       )
@@ -892,36 +889,48 @@ function embedToComponentPayload(embed, actionRows = []) {
   };
 }
 
-function buildApplicationPanel() {
-  const botInfo = getBotInfo();
-  const captOpen = Boolean(botInfo.captRecruitmentOpen);
-  const rpOpen = Boolean(botInfo.rpRecruitmentOpen);
+// Department-driven: any department configured for this guild becomes an
+// application section (name, open/closed, everything editable from the
+// dashboard) - no more hardcoded Capt/RP. A guild with zero departments
+// (new, or departments explicitly disabled) gets one generic "apply to
+// the family" button instead of a section picker.
+async function buildApplicationPanel(guildId) {
+  const { departmentsEnabled } = getGuildConfig(guildId);
+  const departments = departmentsEnabled ? await getDepartmentsForGuild(guildId) : [];
+  const useDepartments = departments.length > 0;
+  const openDepartments = departments.filter((d) => d.recruitmentOpen);
+
   const status = (open) =>
     `${applicationEmojiMention(open ? "unlock" : "lock")} | Набор ${open ? "открыт" : "закрыт"}`;
-  const recruitmentStatus = !captOpen && !rpOpen
-    ? `### Статус набора\n${applicationEmojiMention("lock")} | Набор в оба состава закрыт`
-    : `### Статус набора\n` +
-      `**Капт-состав:** ${status(captOpen)}\n` +
-      `**RP-состав:** ${status(rpOpen)}`;
 
-  const select = new StringSelectMenuBuilder()
-    .setCustomId("application:start")
-    .setPlaceholder("Подать заявку");
-  if (captOpen) {
-    select.addOptions({
-        label: "Заявка в Капт-состав",
-        description: "ORLANDO / RU18",
-        emoji: applicationEmoji("number_1"),
-        value: "capt"
-    });
-  }
-  if (rpOpen) {
-    select.addOptions({
-        label: "Заявка в RP-состав",
-        description: "ORLANDO / RU18",
-        emoji: applicationEmoji("number_2"),
-        value: "rp"
-    });
+  let recruitmentStatus;
+  let actionComponent = null;
+
+  if (useDepartments) {
+    recruitmentStatus = openDepartments.length === 0
+      ? `### Статус набора\n${applicationEmojiMention("lock")} | Набор закрыт во все составы`
+      : `### Статус набора\n${departments.map((d) => `**${d.name}:** ${status(d.recruitmentOpen)}`).join("\n")}`;
+    if (openDepartments.length > 0) {
+      const select = new StringSelectMenuBuilder()
+        .setCustomId("application:start")
+        .setPlaceholder("Подать заявку");
+      openDepartments.slice(0, 25).forEach((department, i) => {
+        select.addOptions({
+          label: `Заявка в ${department.name}`.slice(0, 100),
+          description: "ORLANDO / RU18",
+          emoji: applicationEmoji(`number_${i + 1}`),
+          value: String(department.id)
+        });
+      });
+      actionComponent = select;
+    }
+  } else {
+    recruitmentStatus = `### Статус набора\n${applicationEmojiMention("unlock")} | Приём заявок открыт`;
+    actionComponent = new ButtonBuilder()
+      .setCustomId("application:start:general")
+      .setLabel("Подать заявку в семью")
+      .setEmoji(applicationEmoji("number_1"))
+      .setStyle(ButtonStyle.Secondary);
   }
 
   const container = new ContainerBuilder()
@@ -973,12 +982,12 @@ function buildApplicationPanel() {
       )
     );
 
-  if (captOpen || rpOpen) {
+  if (actionComponent) {
     container
       .addSeparatorComponents(
         new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
       )
-      .addActionRowComponents(new ActionRowBuilder().addComponents(select));
+      .addActionRowComponents(new ActionRowBuilder().addComponents(actionComponent));
   }
 
   return {
@@ -1037,7 +1046,7 @@ function buildAdminPanel() {
       "**Профиль** — открыть профиль любого участника и посмотреть историю.\n" +
       "**Варны** — выдать или снять предупреждение.\n" +
       "**Ранги** — повысить или понизить участника.\n" +
-      "**Составы** — переключить набор в Capt, RP или оба состава."
+      "**Составы** — открыть или закрыть набор в один из отделов семьи."
     );
   const firstRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("admin:profile").setLabel("Профиль").setEmoji(applicationEmoji("profile")).setStyle(ButtonStyle.Secondary),
@@ -1099,18 +1108,27 @@ async function resolveAdminMembers(guild, input, limit = 10) {
   return members.filter(Boolean);
 }
 
-function buildAdminRecruitmentPayload() {
-  const botInfo = getBotInfo();
+async function buildAdminRecruitmentPayload(guildId) {
+  const departments = await getDepartmentsForGuild(guildId);
+  if (!departments.length) {
+    return {
+      embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Управление составами").setDescription("В этой семье пока нет ни одного отдела - настройте их в панели управления на сайте, затем сюда вернитесь, чтобы открывать и закрывать набор.")],
+      components: [],
+      flags: MessageFlags.Ephemeral
+    };
+  }
   const select = new StringSelectMenuBuilder()
     .setCustomId("admin_recruitment_select")
     .setPlaceholder("Выберите состав")
     .addOptions(
-      { label: "Capt", value: "capt", description: `Сейчас набор ${botInfo.captRecruitmentOpen ? "открыт" : "закрыт"}` },
-      { label: "RP", value: "rp", description: `Сейчас набор ${botInfo.rpRecruitmentOpen ? "открыт" : "закрыт"}` },
-      { label: "Оба состава", value: "both", description: "Переключить Capt и RP одновременно" }
+      departments.slice(0, 25).map((department) => ({
+        label: department.name.slice(0, 100),
+        value: String(department.id),
+        description: `Сейчас набор ${department.recruitmentOpen ? "открыт" : "закрыт"}`
+      }))
     );
   return {
-    embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Управление составами").setDescription("Выберите Capt, RP или оба состава. После выбора бот покажет текущее действие и запросит подтверждение.")],
+    embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Управление составами").setDescription("Выберите состав. После выбора бот покажет текущее действие и запросит подтверждение.")],
     components: [new ActionRowBuilder().addComponents(select)],
     flags: MessageFlags.Ephemeral
   };
@@ -1212,10 +1230,13 @@ function isValidLinkUrl(rawUrl) {
   }
 }
 
-function buildApplicationModal(section) {
+// departmentId is null for the generic (no-department) apply flow - the
+// modal's customId carries "general" in that slot instead of a real id, so
+// the submit handler downstream can tell the two apart.
+function buildApplicationModal(departmentId, departmentName) {
   const modal = new ModalBuilder()
-    .setCustomId(modalCustomId("family_application", section))
-    .setTitle(`Заявка в ${applicationSectionLabel(section)}`);
+    .setCustomId(modalCustomId("family_application", departmentId ?? "general"))
+    .setTitle(`Заявка в ${departmentName}`.slice(0, 45));
 
   const character = new TextInputBuilder()
     .setCustomId("character")
@@ -1234,7 +1255,7 @@ function buildApplicationModal(section) {
   const reason = new TextInputBuilder()
     .setCustomId("reason")
     .setLabel("Почему хотите вступить?")
-    .setPlaceholder("Расскажите, почему выбрали Destroy и чем будете полезны фаме")
+    .setPlaceholder("Расскажите, почему выбрали фаму и чем будете полезны")
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(true);
 
@@ -1245,28 +1266,12 @@ function buildApplicationModal(section) {
     .setStyle(TextInputStyle.Short)
     .setRequired(true);
 
-  const captRole = new StringSelectMenuBuilder()
-    .setCustomId("capt_role")
-    .setPlaceholder("Выберите Collers или Main")
-    .setRequired(true)
-    .addOptions(
-      { label: "Collers", value: "Collers" },
-      { label: "Main", value: "Main" }
-    );
-
   modal.addComponents(
     new ActionRowBuilder().addComponents(character),
     new ActionRowBuilder().addComponents(charactersLink),
     new ActionRowBuilder().addComponents(oocAge),
     new ActionRowBuilder().addComponents(reason)
   );
-  if (section === "capt") {
-    modal.addComponents(
-      new LabelBuilder()
-        .setLabel("Кем хотите быть?")
-        .setStringSelectMenuComponent(captRole)
-    );
-  }
 
   return modal;
 }
@@ -1542,12 +1547,13 @@ async function refreshApplicationPanel(guild) {
   const current = panels?.first() ?? null;
   const duplicates = panels?.filter((message) => message.id !== current?.id) ?? [];
   await Promise.allSettled(duplicates.map((message) => message.delete()));
+  const panelPayload = await buildApplicationPanel(guild.id);
   if (current) {
-    const updated = await current.edit(buildApplicationPanel()).catch(() => null);
+    const updated = await current.edit(panelPayload).catch(() => null);
     if (updated) return updated;
     await current.delete().catch(() => null);
   }
-  return channel.send(buildApplicationPanel());
+  return channel.send(panelPayload);
 }
 
 async function refreshStaticPanel(guild, channelId, componentId, payloadBuilder) {
@@ -2555,7 +2561,7 @@ async function handleInteraction(interaction) {
       return;
     }
     if (section === "recruitment") {
-      await interaction.reply(buildAdminRecruitmentPayload());
+      await interaction.reply(await buildAdminRecruitmentPayload(interaction.guildId));
       return;
     }
     if (!["warn", "rank"].includes(section)) {
@@ -2586,16 +2592,18 @@ async function handleInteraction(interaction) {
       await interaction.reply({ content: noticeMessage("Это действие доступно только руководству семьи."), flags: MessageFlags.Ephemeral });
       return;
     }
-    const section = interaction.values[0];
-    const botInfo = getBotInfo();
-    const currentlyOpen = section === "capt" ? botInfo.captRecruitmentOpen : section === "rp" ? botInfo.rpRecruitmentOpen : botInfo.captRecruitmentOpen && botInfo.rpRecruitmentOpen;
-    const nextOpen = !currentlyOpen;
-    const sectionText = section === "both" ? "оба состава" : applicationSectionLabel(section);
+    const departmentId = interaction.values[0];
+    const department = await getDepartmentById(interaction.guildId, departmentId);
+    if (!department) {
+      await interaction.update({ content: errorMessage("Отдел не найден - возможно, его уже удалили."), embeds: [], components: [] });
+      return;
+    }
+    const nextOpen = !department.recruitmentOpen;
     await interaction.update({
-      content: `Вы уверены, что хотите **${nextOpen ? "открыть" : "закрыть"}** набор в ${sectionText}?`,
+      content: `Вы уверены, что хотите **${nextOpen ? "открыть" : "закрыть"}** набор в ${department.name}?`,
       embeds: [],
       components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`recruitment:confirm:${section}:${nextOpen ? 1 : 0}`).setLabel("Подтвердить").setEmoji(applicationEmoji("confirm")).setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`recruitment:confirm:${departmentId}:${nextOpen ? 1 : 0}`).setLabel("Подтвердить").setEmoji(applicationEmoji("confirm")).setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId("recruitment:cancel").setLabel("Отменить").setEmoji(applicationEmoji("cancel")).setStyle(ButtonStyle.Secondary)
       )]
     });
@@ -2727,30 +2735,30 @@ async function handleInteraction(interaction) {
       });
       return;
     }
-    const [, , section, rawOpen] = interaction.customId.split(":");
-    if (!["capt", "rp", "both"].includes(section) || !["0", "1"].includes(rawOpen)) {
+    const [, , departmentId, rawOpen] = interaction.customId.split(":");
+    if (!["0", "1"].includes(rawOpen)) {
       await interaction.update({ content: errorMessage("Некорректные параметры изменения набора."), components: [] });
+      return;
+    }
+    const department = await getDepartmentById(interaction.guildId, departmentId);
+    if (!department) {
+      await interaction.update({ content: errorMessage("Отдел не найден - возможно, его уже удалили."), components: [] });
       return;
     }
     await interaction.deferUpdate();
     const open = rawOpen === "1";
-    const botInfo = getBotInfo();
-    if (section === "capt" || section === "both") botInfo.captRecruitmentOpen = open;
-    if (section === "rp" || section === "both") botInfo.rpRecruitmentOpen = open;
-    await saveBotInfo(botInfo, section);
-    await flushStorage();
+    await updateDepartmentForGuild(interaction.guildId, departmentId, { recruitmentOpen: open });
     await refreshApplicationPanel(interaction.guild);
 
-    const sectionText = section === "both" ? "оба состава" : applicationSectionLabel(section);
     await sendLog(
       interaction.guild,
       new EmbedBuilder()
         .setColor(open ? 0x27ae60 : 0xeb5757)
         .setTitle(`Набор ${open ? "открыт" : "закрыт"}`)
-        .setDescription(`<@${interaction.user.id}> изменил статус набора в **${sectionText}**.`)
+        .setDescription(`<@${interaction.user.id}> изменил статус набора в **${department.name}**.`)
     );
     await interaction.editReply({
-      content: successMessage(`Набор в ${sectionText} **${open ? "открыт" : "закрыт"}**!`),
+      content: successMessage(`Набор в ${department.name} **${open ? "открыт" : "закрыт"}**!`),
       components: []
     });
     return;
@@ -3004,21 +3012,33 @@ async function handleInteraction(interaction) {
     return;
   }
 
-  if (interaction.isStringSelectMenu() && interaction.customId === "application:start") {
-    const resetApplicationPanel = () => interaction.message.edit(buildApplicationPanel()).catch((error) => {
-      console.error("Failed to reset application section selector:", error);
-    });
-    const section = interaction.values[0];
-    const botInfo = getBotInfo();
-    const open = section === "capt" ? botInfo.captRecruitmentOpen : botInfo.rpRecruitmentOpen;
-    if (!open) {
-      await interaction.reply({
-        content: noticeMessage(`Набор в ${applicationSectionLabel(section)} сейчас закрыт.`),
-        flags: MessageFlags.Ephemeral
-      });
-      void resetApplicationPanel();
-      return;
+  if (
+    (interaction.isStringSelectMenu() && interaction.customId === "application:start") ||
+    (interaction.isButton() && interaction.customId === "application:start:general")
+  ) {
+    const resetApplicationPanel = () =>
+      buildApplicationPanel(interaction.guildId)
+        .then((payload) => interaction.message.edit(payload))
+        .catch((error) => {
+          console.error("Failed to reset application section selector:", error);
+        });
+
+    let departmentId = null;
+    let departmentName = "семью";
+    if (interaction.isStringSelectMenu()) {
+      departmentId = interaction.values[0];
+      const department = await getDepartmentById(interaction.guildId, departmentId);
+      if (!department?.recruitmentOpen) {
+        await interaction.reply({
+          content: noticeMessage("Этот состав сейчас закрыт для набора."),
+          flags: MessageFlags.Ephemeral
+        });
+        void resetApplicationPanel();
+        return;
+      }
+      departmentName = department.name;
     }
+
     const rank = getRankFromMemberRoles(interaction.member);
     if (rank) {
       await interaction.reply({
@@ -3053,8 +3073,8 @@ async function handleInteraction(interaction) {
       }
     }
 
-    await interaction.showModal(buildApplicationModal(section));
-    void resetApplicationPanel();
+    await interaction.showModal(buildApplicationModal(departmentId, departmentName));
+    if (interaction.isStringSelectMenu()) void resetApplicationPanel();
     return;
   }
 
@@ -3121,7 +3141,7 @@ async function handleInteraction(interaction) {
     try {
       const { verifiedMemberRoleId } = getGuildConfig(member.guild.id);
       if (verifiedMemberRoleId) {
-        await member.roles.add(verifiedMemberRoleId, `Принята заявка в ${applicationSectionLabel(application.requestType)}`);
+        await member.roles.add(verifiedMemberRoleId, `Принята заявка в ${application.departmentName ?? "семью"}`);
       }
       const oldRank = getRankFromMemberRoles(member);
       await syncMemberRankRole(member, rank);
@@ -3131,6 +3151,12 @@ async function handleInteraction(interaction) {
         adminId: interaction.user.id,
         reason: "Принята заявка на вступление"
       });
+      // requestType is the department id for a real department, or the
+      // "general" sentinel for the no-department flow - only append to a
+      // real department's roster.
+      if (application.requestType !== "general") {
+        await addMemberToDepartment(interaction.guildId, application.requestType, member.id);
+      }
     } catch (error) {
       await interaction.followUp({
         content: errorMessage(`Не удалось принять заявку: не получилось выдать роли кандидату. ${error.message}`),
@@ -3506,20 +3532,22 @@ async function handleInteraction(interaction) {
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith("family_application:")) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const section = interaction.customId.split(":")[1];
-    if (!["capt", "rp"].includes(section)) {
-      await interaction.editReply({ content: errorMessage("Не удалось определить выбранный состав.") });
-      return;
-    }
-    const botInfo = getBotInfo();
-    const recruitmentOpen = section === "capt"
-      ? botInfo.captRecruitmentOpen
-      : botInfo.rpRecruitmentOpen;
-    if (!recruitmentOpen) {
-      await interaction.editReply({
-        content: noticeMessage(`Набор в ${applicationSectionLabel(section)} уже закрыт.`)
-      });
-      return;
+    const departmentIdRaw = interaction.customId.split(":")[1];
+    const isGeneral = !departmentIdRaw || departmentIdRaw === "general";
+    let departmentName = "семью";
+    if (!isGeneral) {
+      const department = await getDepartmentById(interaction.guildId, departmentIdRaw);
+      if (!department) {
+        await interaction.editReply({ content: errorMessage("Не удалось определить выбранный состав.") });
+        return;
+      }
+      if (!department.recruitmentOpen) {
+        await interaction.editReply({
+          content: noticeMessage(`Набор в ${department.name} уже закрыт.`)
+        });
+        return;
+      }
+      departmentName = department.name;
     }
 
     const rank = await getRankFromUser(interaction.guild, interaction.user.id);
@@ -3559,13 +3587,6 @@ async function handleInteraction(interaction) {
       });
       return;
     }
-    const captRole = section === "capt"
-      ? interaction.fields.getStringSelectValues("capt_role")[0]
-      : null;
-    if (section === "capt" && !["Collers", "Main"].includes(captRole)) {
-      await interaction.editReply({ content: errorMessage("Выберите, кем хотите быть: Collers или Main.") });
-      return;
-    }
     const charactersLink = interaction.fields.getTextInputValue("characters_link").trim();
     if (!isValidLinkUrl(charactersLink)) {
       await interaction.editReply({
@@ -3577,8 +3598,7 @@ async function handleInteraction(interaction) {
       characterInfo,
       oocAge: interaction.fields.getTextInputValue("ooc_age"),
       reason: interaction.fields.getTextInputValue("reason"),
-      charactersLink,
-      captRole
+      charactersLink
     };
 
     await interaction.editReply({
@@ -3595,12 +3615,12 @@ async function handleInteraction(interaction) {
       channelId: channel.id,
       messageId: null,
       status: "new",
-      requestType: section,
+      requestType: isGeneral ? "general" : departmentIdRaw,
+      departmentName,
       characterInfo: values.characterInfo,
       oocAge: values.oocAge,
       reason: values.reason,
       charactersLink: values.charactersLink,
-      captRole: values.captRole,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -3635,7 +3655,7 @@ async function handleInteraction(interaction) {
       : null;
     if (applicationsChannel?.isTextBased() && applicationsChannel.id !== channel.id) {
       const announcement = await applicationsChannel.send(
-        noticeMessage(`Новая заявка в **${applicationSectionLabel(application.requestType)}** **${uid}**: ${channel}`)
+        noticeMessage(`Новая заявка в **${application.departmentName}** **${uid}**: ${channel}`)
       );
       const latestApplications = getApplications();
       if (latestApplications[applicationKey]?.channelId === channel.id) {
@@ -3653,11 +3673,8 @@ async function handleInteraction(interaction) {
         .setDescription(`<@${interaction.user.id}> создал заявку в ${interaction.guild.name}.`)
         .addFields(
           { name: "UID", value: uid, inline: true },
-          { name: "Состав", value: applicationSectionLabel(application.requestType), inline: true },
+          { name: "Состав", value: application.departmentName, inline: true },
           { name: "IC имя / уровень / Static ID", value: String(application.characterInfo).slice(0, 1024) },
-          ...(application.requestType === "capt"
-            ? [{ name: "Кем хочет быть", value: String(application.captRole).slice(0, 1024), inline: true }]
-            : []),
           { name: "OOC возраст", value: String(application.oocAge).slice(0, 1024), inline: true }
         )
     );

@@ -9,13 +9,17 @@
 const http = require("node:http");
 const {
   addBanForGuild,
+  createDepartmentForGuild,
+  deleteDepartmentForGuild,
   getAfkSessionsForApi,
   getAuditLogForGuild,
   getBansForGuild,
+  getDepartmentsForGuild,
   getGuildConfig,
   getGuildMembersForApi,
   getTicketsForGuild,
   removeBanForGuild,
+  updateDepartmentForGuild,
   updateGuildConfig
 } = require("./storage");
 
@@ -28,7 +32,8 @@ const PATCHABLE_CONFIG_FIELDS = new Set([
   "applicationsChannelId",
   "applicationPanelChannelId",
   "supportPanelChannelId",
-  "adminPanelChannelId"
+  "adminPanelChannelId",
+  "departmentsEnabled"
 ]);
 
 function readJsonBody(req) {
@@ -107,10 +112,65 @@ async function handleBans(req, res, guildId) {
   return sendJson(res, 405, { error: "Method not allowed" });
 }
 
+async function handleDepartments(req, res, guildId, departmentId) {
+  if (departmentId) {
+    if (req.method === "PATCH") {
+      let body;
+      try {
+        body = await readJsonBody(req);
+      } catch (error) {
+        return sendJson(res, 400, { error: error.message });
+      }
+      const patch = {};
+      if (Array.isArray(body.memberDiscordIds)) patch.memberDiscordIds = body.memberDiscordIds;
+      if (typeof body.recruitmentOpen === "boolean") patch.recruitmentOpen = body.recruitmentOpen;
+      if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No recognized fields in body" });
+      const updated = await updateDepartmentForGuild(guildId, departmentId, patch);
+      if (!updated) return sendJson(res, 404, { error: "Department not found" });
+      return sendJson(res, 200, updated);
+    }
+    if (req.method === "DELETE") {
+      await deleteDepartmentForGuild(guildId, departmentId);
+      res.writeHead(204).end();
+      return;
+    }
+    return sendJson(res, 405, { error: "Method not allowed" });
+  }
+
+  if (req.method === "GET") return sendJson(res, 200, await getDepartmentsForGuild(guildId));
+  if (req.method === "POST") {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    const name = String(body.name ?? "").trim();
+    if (!name) return sendJson(res, 400, { error: "name is required" });
+    return sendJson(res, 201, await createDepartmentForGuild(guildId, name));
+  }
+  return sendJson(res, 405, { error: "Method not allowed" });
+}
+
 async function handleApiRequest(client, req, res, url) {
   if (!isAuthorized(req)) return sendJson(res, 401, { error: "Unauthorized" });
 
   const segments = url.pathname.split("/").filter(Boolean); // ["api", "guilds", ":id", resource, ...rest]
+
+  // Not guild-scoped: which guilds is the bot actually in right now. The
+  // dashboard's "is the bot installed here" check used to read the web
+  // app's own guilds table, which nothing ever wrote to - this is the live
+  // answer, straight from Discord.js's own cache, always current.
+  if (segments[0] === "api" && segments[1] === "bot-guilds" && segments.length === 2) {
+    if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
+    return sendJson(res, 200, [...client.guilds.cache.values()].map((guild) => ({
+      id: guild.id,
+      name: guild.name,
+      icon: guild.icon,
+      ownerDiscordId: guild.ownerId
+    })));
+  }
+
   if (segments[0] !== "api" || segments[1] !== "guilds" || !/^\d+$/.test(segments[2] ?? "")) {
     return sendJson(res, 404, { error: "Not found" });
   }
@@ -125,6 +185,7 @@ async function handleApiRequest(client, req, res, url) {
     res.writeHead(204).end();
     return;
   }
+  if (resource === "departments" && rest.length <= 1) return handleDepartments(req, res, guildId, rest[0]);
 
   if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
 

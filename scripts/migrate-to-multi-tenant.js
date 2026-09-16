@@ -145,10 +145,12 @@ async function main() {
         guild_id            TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
         name                TEXT NOT NULL,
         member_discord_ids  TEXT[] NOT NULL DEFAULT '{}',
+        recruitment_open    BOOLEAN NOT NULL DEFAULT TRUE,
         created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
       );
       CREATE INDEX IF NOT EXISTS guild_departments_guild_id_idx ON guild_departments (guild_id);
     `);
+    await client.query(`ALTER TABLE guild_departments ADD COLUMN IF NOT EXISTS recruitment_open BOOLEAN NOT NULL DEFAULT TRUE;`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS automod_filter_config (
@@ -182,9 +184,11 @@ async function main() {
         application_panel_channel_id  TEXT,
         support_panel_channel_id      TEXT,
         admin_panel_channel_id        TEXT,
+        departments_enabled           BOOLEAN NOT NULL DEFAULT TRUE,
         updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
       );
     `);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS departments_enabled BOOLEAN NOT NULL DEFAULT TRUE;`);
 
     // rank_role_ids is {"<rank>": {roleIds: [...], label, nicknamePrefix}} -
     // an arbitrary-length, self-describing structure (any rank count, any
@@ -266,6 +270,35 @@ async function main() {
     // once the bot writes guild_id on every insert itself.
     await client.query(`ALTER TABLE recruitment_settings ADD COLUMN IF NOT EXISTS guild_id TEXT REFERENCES guilds(id) ON DELETE CASCADE;`);
     await client.query(`UPDATE recruitment_settings SET guild_id = $1 WHERE guild_id IS NULL;`, [DISCORD_GUILD_ID]);
+
+    // The application flow used to be hardcoded to two sections (Capt/RP)
+    // via recruitment_settings - it's department-driven now (any number of
+    // departments, any names). A guild with zero departments gets a single
+    // generic "apply to the family" button instead, which would silently
+    // replace this guild's real, currently-working Capt/RP recruitment the
+    // moment this deploys. Seed two departments from its legacy
+    // recruitment_settings rows (same open/closed state) so the live
+    // family's recruitment keeps working exactly as it does today under
+    // the new system - guarded on guild_departments already being empty,
+    // so this never runs again or touches departments a family has since
+    // configured themselves.
+    const { rows: existingDepartmentCount } = await client.query(
+      `SELECT count(*)::int AS n FROM guild_departments WHERE guild_id = $1`,
+      [DISCORD_GUILD_ID]
+    );
+    if (existingDepartmentCount[0].n === 0) {
+      const { rows: legacyRecruitment } = await client.query(
+        `SELECT section, recruitment_open FROM recruitment_settings WHERE guild_id = $1`,
+        [DISCORD_GUILD_ID]
+      );
+      for (const row of legacyRecruitment) {
+        const name = String(row.section).toLowerCase() === "capt" ? "Капт-состав" : "RP-состав";
+        await client.query(
+          `INSERT INTO guild_departments (guild_id, name, recruitment_open) VALUES ($1, $2, $3)`,
+          [DISCORD_GUILD_ID, name, row.recruitment_open]
+        );
+      }
+    }
 
     await client.query(`ALTER TABLE user_logs ADD COLUMN IF NOT EXISTS guild_id TEXT REFERENCES guilds(id) ON DELETE CASCADE;`);
     await client.query(`UPDATE user_logs SET guild_id = $1 WHERE guild_id IS NULL;`, [DISCORD_GUILD_ID]);

@@ -166,6 +166,11 @@ CREATE TABLE IF NOT EXISTS guild_config (
   application_panel_channel_id  TEXT,
   support_panel_channel_id      TEXT,
   admin_panel_channel_id        TEXT,
+  -- Mirrors the dashboard's "departments" module toggle - distinguishes
+  -- "no departments configured yet" (falls back to the generic apply
+  -- button) from "departments exist but explicitly disabled" (same
+  -- fallback, different reason). Defaults true like every module.
+  departments_enabled           BOOLEAN NOT NULL DEFAULT TRUE,
   updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -184,6 +189,10 @@ CREATE TABLE IF NOT EXISTS guild_departments (
   guild_id            TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
   name                TEXT NOT NULL,
   member_discord_ids  TEXT[] NOT NULL DEFAULT '{}',
+  -- Whether this department is currently accepting applications - the
+  -- application panel lists only open departments, and shows a single
+  -- generic "apply to the family" button instead when a guild has none.
+  recruitment_open    BOOLEAN NOT NULL DEFAULT TRUE,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS guild_departments_guild_id_idx ON guild_departments (guild_id);
