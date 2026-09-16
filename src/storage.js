@@ -117,6 +117,16 @@ async function initStorage() {
   }
   if (lastError) throw lastError;
   if (sslCaPath && !tls?.cipher) throw new Error("Postgres-соединение установлено без TLS");
+
+  // One-time (idempotent - safe to run on every boot) upgrade to the
+  // multi-tenant schema. Runs here, inside Railway's private network,
+  // because the machine deploying this code cannot reach
+  // <service>.railway.internal directly to run it by hand.
+  await require("../scripts/migrate-to-multi-tenant").main().catch((error) => {
+    console.error("Multi-tenant schema migration failed:", error);
+    throw error;
+  });
+
   resetState();
   await loadState();
   console.log(tls?.cipher ? `Postgres storage connected with TLS (${tls.cipher}).` : "Postgres storage connected (private network, no TLS).");
