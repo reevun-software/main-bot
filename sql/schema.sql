@@ -18,17 +18,6 @@ CREATE TABLE IF NOT EXISTS recruitment_settings (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS capt_replay_window (
-  id             INTEGER PRIMARY KEY,
-  is_open        BOOLEAN NOT NULL DEFAULT FALSE,
-  opened_at      TIMESTAMPTZ,
-  opened_by      TEXT,
-  thread_id      TEXT,
-  open_count     INTEGER NOT NULL DEFAULT 0,
-  thread_history JSONB NOT NULL DEFAULT '[]'::jsonb,
-  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS user_logs (
   id                BIGSERIAL PRIMARY KEY,
   log_type          TEXT NOT NULL, -- 'rank' | 'warn'
@@ -84,8 +73,4 @@ CREATE INDEX IF NOT EXISTS afk_sessions_expires_at_idx ON afk_sessions (expires_
 
 INSERT INTO recruitment_settings (id, section, recruitment_open)
 VALUES (1, 'Capt', FALSE), (2, 'RP', FALSE)
-ON CONFLICT (id) DO NOTHING;
-
-INSERT INTO capt_replay_window (id, is_open, open_count, thread_history)
-VALUES (1, FALSE, 0, '[]'::jsonb)
 ON CONFLICT (id) DO NOTHING;

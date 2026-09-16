@@ -7,7 +7,6 @@ const ROOT = path.join(__dirname, "..");
 const state = {
   applications: {},
   botInfo: {},
-  captReplayWindow: { isOpen: false, openedAt: null, openedBy: null, threadId: null, openCount: 0, threadHistory: [] },
   ranks: {},
   supportTickets: {},
   users: {},
@@ -33,19 +32,6 @@ function isoDate(value) {
 
 function json(value) {
   return JSON.stringify(value ?? {});
-}
-
-function parseJsonArray(value) {
-  if (Array.isArray(value)) return value;
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
 }
 
 function queueWrite(label, operation) {
@@ -139,7 +125,6 @@ async function initStorage() {
 function resetState() {
   state.applications = {};
   state.botInfo = {};
-  state.captReplayWindow = { isOpen: false, openedAt: null, openedBy: null, threadId: null, openCount: 0, threadHistory: [] };
   state.ranks = {};
   state.supportTickets = {};
   state.users = {};
@@ -167,18 +152,6 @@ async function loadState() {
     rpRecruitmentOpen: Boolean(rpSettings?.recruitment_open),
     captUpdatedAt: isoDate(captSettings?.updated_at),
     rpUpdatedAt: isoDate(rpSettings?.updated_at)
-  };
-
-  const { rows: captReplayRows } = await pool.query(
-    "SELECT is_open, opened_at, opened_by, thread_id, open_count, thread_history FROM capt_replay_window WHERE id = 1"
-  );
-  state.captReplayWindow = {
-    isOpen: Boolean(captReplayRows[0]?.is_open),
-    openedAt: isoDate(captReplayRows[0]?.opened_at),
-    openedBy: captReplayRows[0]?.opened_by ?? null,
-    threadId: captReplayRows[0]?.thread_id ?? null,
-    openCount: Number(captReplayRows[0]?.open_count ?? 0),
-    threadHistory: parseJsonArray(captReplayRows[0]?.thread_history)
   };
 
   const { rows: users } = await pool.query("SELECT * FROM users");
@@ -268,7 +241,6 @@ async function loadState() {
 
 function getWarnings() { return state.warnings; }
 function getBotInfo() { return state.botInfo; }
-function getCaptReplayWindow() { return state.captReplayWindow; }
 function getApplications() { return state.applications; }
 function getUserDb() { return state.users; }
 function getRankHistory() { return state.ranks; }
@@ -397,32 +369,6 @@ function saveBotInfo(info, section = "both") {
         [id, sectionName, open]
       );
     }
-  });
-}
-
-function saveCaptReplayWindow(window) {
-  state.captReplayWindow = window;
-  return queueWrite("capt replay window", async () => {
-    await pool.query(
-      `INSERT INTO capt_replay_window (id, is_open, opened_at, opened_by, thread_id, open_count, thread_history, updated_at)
-       VALUES (1, $1, $2, $3, $4, $5, $6, now())
-       ON CONFLICT (id) DO UPDATE SET
-         is_open = EXCLUDED.is_open,
-         opened_at = EXCLUDED.opened_at,
-         opened_by = EXCLUDED.opened_by,
-         thread_id = EXCLUDED.thread_id,
-         open_count = EXCLUDED.open_count,
-         thread_history = EXCLUDED.thread_history,
-         updated_at = now()`,
-      [
-        Boolean(window.isOpen),
-        pgTimestamp(window.openedAt),
-        window.openedBy ?? null,
-        window.threadId ?? null,
-        Number(window.openCount) || 0,
-        json(window.threadHistory ?? [])
-      ]
-    );
   });
 }
 
@@ -646,7 +592,6 @@ module.exports = {
   getActiveGameAfkSessions,
   getApplications,
   getBotInfo,
-  getCaptReplayWindow,
   getGameAfkSession,
   getRankHistory,
   getSupportTickets,
@@ -657,7 +602,6 @@ module.exports = {
   removeGameAfkSession,
   saveApplications,
   saveBotInfo,
-  saveCaptReplayWindow,
   saveGameAfkSession,
   saveRankHistory,
   saveSupportTickets,

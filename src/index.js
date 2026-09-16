@@ -18,7 +18,6 @@ const {
   GatewayIntentBits,
   LabelBuilder,
   MessageFlags,
-  MessageType,
   ModalBuilder,
   Partials,
   PermissionFlagsBits,
@@ -39,7 +38,6 @@ const {
   getActiveGameAfkSessions,
   getApplications,
   getBotInfo,
-  getCaptReplayWindow,
   getGameAfkSession,
   getRankHistory,
   getSupportTickets,
@@ -50,7 +48,6 @@ const {
   removeGameAfkSession,
   saveApplications,
   saveBotInfo,
-  saveCaptReplayWindow,
   saveGameAfkSession,
   saveRankHistory,
   saveSupportTickets,
@@ -225,9 +222,6 @@ const APPLICATION_REJECTION_COOLDOWN_MS = 10 * 24 * 60 * 60 * 1000;
 const APPLICATION_PANEL_CHANNEL_ID = "1315860449442398239";
 const SUPPORT_PANEL_CHANNEL_ID = "1509572136694452407";
 const ADMIN_PANEL_CHANNEL_ID = "1291543297747194010";
-const CAPT_REPLAY_CHANNEL_ID = "1540244840250351666";
-const CAPT_REPLAY_WINDOW_MS = 90 * 60 * 1000;
-const CAPT_REPLAY_SWEEP_INTERVAL_MS = 30 * 1000;
 const VERIFIED_MEMBER_ROLE_ID = "1265995505524015245";
 const SUPPORT_REQUEST_TYPES = {
   bonus: "Заявка на получение премии",
@@ -1230,82 +1224,6 @@ function isValidLinkUrl(rawUrl) {
   }
 }
 
-function parseYoutubeUrl(rawUrl) {
-  try {
-    const url = new URL(rawUrl);
-    if (!["youtube.com", "www.youtube.com", "youtu.be", "www.youtu.be"].includes(url.hostname.toLowerCase())) {
-      return null;
-    }
-    return url;
-  } catch {
-    return null;
-  }
-}
-
-function captReplayWindowExpiresAt(window) {
-  const openedAtMs = Date.parse(window.openedAt ?? "");
-  return Number.isFinite(openedAtMs) ? openedAtMs + CAPT_REPLAY_WINDOW_MS : null;
-}
-
-function isCaptReplayWindowOpen(window) {
-  const expiresAt = captReplayWindowExpiresAt(window);
-  return Boolean(window.isOpen) && expiresAt !== null && Date.now() < expiresAt;
-}
-
-function buildCaptReplayPanel(window) {
-  const open = isCaptReplayWindowOpen(window);
-  const expiresAt = captReplayWindowExpiresAt(window);
-  const embed = new EmbedBuilder()
-    .setColor(0x000000)
-    .setURL("https://destroy.internal/panel?c=capt_replay:upload")
-    .setDescription(
-      "### Как это работает\n" +
-      "• Приём откатов открывается на **90 минут**.\n" +
-      (open
-        ? "• Пока приём открыт, кнопка «Загрузить откат» ниже активна — нажмите её и пришлите ссылку.\n"
-        : "• Пока приём открыт, здесь появляется кнопка «Загрузить откат» — нажмите её и пришлите ссылку.\n") +
-      "• Ссылка должна вести на **YouTube** (youtube.com или youtu.be), другие сайты не принимаются.\n" +
-      "• За одно открытие каждый участник может отправить **только один откат** — повторная " +
-      "отправка в это же окно будет отклонена.\n\n" +
-      "### После отправки\n" +
-      "Бот создаёт под этим сообщением отдельную ветку и публикует туда каждый присланный " +
-      "откат — так руководству удобно рассматривать их все в одном месте.\n\n" +
-      (open
-        ? `**Приём открыт до ${discordTimestampFromMs(expiresAt)}.**`
-        : "**Приём сейчас закрыт.**")
-    );
-  if (!open) return { content: null, embeds: [embed], components: [] };
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("capt_replay:upload")
-      .setLabel("Загрузить откат")
-      .setEmoji(applicationEmoji("disk"))
-      .setStyle(ButtonStyle.Secondary)
-  );
-  return { content: null, embeds: [embed], components: [row] };
-}
-
-async function hasSubmittedCaptReplay(thread, userId) {
-  if (!thread) return false;
-  const messages = await thread.messages.fetch({ limit: 100 }).catch(() => null);
-  if (!messages) return false;
-  return messages.some((message) => message.embeds[0]?.footer?.text === userId);
-}
-
-function buildCaptReplayModal() {
-  const modal = new ModalBuilder()
-    .setCustomId(modalCustomId("capt_replay", "submit"))
-    .setTitle("Загрузить откат");
-  const url = new TextInputBuilder()
-    .setCustomId("url")
-    .setLabel("Ссылка на YouTube")
-    .setPlaceholder("https://youtu.be/...")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true);
-  modal.addComponents(new ActionRowBuilder().addComponents(url));
-  return modal;
-}
-
 function buildApplicationModal(section) {
   const modal = new ModalBuilder()
     .setCustomId(modalCustomId("family_application", section))
@@ -1690,87 +1608,6 @@ async function processExpiredGameAfkSessions(clientInstance) {
   }
 }
 
-async function deleteCaptReplayThreads(guild, threadIds) {
-  for (const threadId of threadIds) {
-    const thread = await guild.channels.fetch(threadId).catch(() => null);
-    if (thread?.isThread()) await thread.delete("Плановая очистка старых веток откатов").catch(() => null);
-  }
-}
-
-async function openCaptReplayWindow(guild, adminId) {
-  const current = getCaptReplayWindow();
-  const openCount = (Number(current.openCount) || 0) + 1;
-  // Every 5th opening, purge the threads accumulated from the previous 4 closes.
-  const purge = openCount % 5 === 0;
-  const threadHistory = purge ? [] : (current.threadHistory ?? []);
-  if (purge) await deleteCaptReplayThreads(guild, current.threadHistory ?? []);
-
-  const openedAt = new Date().toISOString();
-  await saveCaptReplayWindow({ isOpen: true, openedAt, openedBy: adminId, threadId: null, openCount, threadHistory });
-  const panelMessage = await refreshStaticPanel(
-    guild,
-    CAPT_REPLAY_CHANNEL_ID,
-    "capt_replay:upload",
-    () => buildCaptReplayPanel(getCaptReplayWindow())
-  );
-  let threadId = null;
-  if (panelMessage) {
-    // A standalone thread (not attached to the panel message) so a new one can be created
-    // every time the window opens - a message can only ever have one thread created from it.
-    const thread = await panelMessage.channel.threads.create({
-      name: `Откаты Капт — ${new Date(openedAt).toLocaleDateString("ru-RU")}`,
-      autoArchiveDuration: 1440,
-      type: ChannelType.PublicThread,
-      reason: `Приём откатов открыт: ${adminId}`
-    }).catch((error) => {
-      console.error("Failed to create capt replay thread:", error);
-      return null;
-    });
-    threadId = thread?.id ?? null;
-    if (thread) {
-      const recentMessages = await panelMessage.channel.messages.fetch({ limit: 5 }).catch(() => null);
-      const threadNotice = recentMessages?.find((message) => message.type === MessageType.ThreadCreated);
-      await threadNotice?.delete().catch(() => null);
-    }
-  }
-  const finalWindow = { isOpen: true, openedAt, openedBy: adminId, threadId, openCount, threadHistory };
-  await saveCaptReplayWindow(finalWindow);
-  return finalWindow;
-}
-
-async function closeCaptReplayWindow(guild, window) {
-  if (window.threadId) {
-    const thread = await guild.channels.fetch(window.threadId).catch(() => null);
-    if (thread?.isThread() && !thread.archived) {
-      await thread.setLocked(true, "Приём откатов закрыт").catch(() => null);
-      await thread.setArchived(true, "Приём откатов закрыт").catch(() => null);
-    }
-  }
-  const threadHistory = [...(window.threadHistory ?? []), window.threadId].filter(Boolean);
-  await saveCaptReplayWindow({ ...window, isOpen: false, threadId: null, threadHistory });
-  await refreshStaticPanel(
-    guild,
-    CAPT_REPLAY_CHANNEL_ID,
-    "capt_replay:upload",
-    () => buildCaptReplayPanel(getCaptReplayWindow())
-  );
-}
-
-async function processCaptReplayExpiry(clientInstance) {
-  const window = getCaptReplayWindow();
-  if (!window.isOpen) return;
-  const expiresAt = captReplayWindowExpiresAt(window);
-  if (expiresAt === null || Date.now() < expiresAt) return;
-
-  const guild = await clientInstance.guilds.fetch(process.env.DISCORD_GUILD_ID).catch(() => null);
-  if (!guild) return;
-  await closeCaptReplayWindow(guild, window);
-  await sendLog(guild, new EmbedBuilder()
-    .setColor(0xf2c94c)
-    .setTitle("Приём откатов Капт закрыт автоматически")
-    .setDescription("Истекло время окна приёма откатов (1 час 30 минут)."));
-}
-
 function buildSupportTicketMessagePayload(ticket, user) {
   const statusLabels = {
     new: "Новая",
@@ -2110,14 +1947,6 @@ async function handleClientReady(readyClient) {
     await refreshStaticPanel(guild, ADMIN_PANEL_CHANNEL_ID, "admin:warn", buildAdminPanel).catch((error) => {
       console.error("Не удалось обновить админ-панель:", error);
     });
-    await refreshStaticPanel(
-      guild,
-      CAPT_REPLAY_CHANNEL_ID,
-      "capt_replay:upload",
-      () => buildCaptReplayPanel(getCaptReplayWindow())
-    ).catch((error) => {
-      console.error("Не удалось обновить панель приёма откатов с капта:", error);
-    });
 
     await syncGuildStateFromRoles(guild).catch((error) => {
       console.error("Не удалось синхронизировать состояние по ролям:", error);
@@ -2132,13 +1961,6 @@ async function handleClientReady(readyClient) {
     });
   }, GAME_AFK_SWEEP_INTERVAL_MS);
   gameAfkSweep.unref?.();
-
-  const captReplaySweep = setInterval(() => {
-    processCaptReplayExpiry(readyClient).catch((error) => {
-      console.error("Failed to process capt replay window expiry:", error);
-    });
-  }, CAPT_REPLAY_SWEEP_INTERVAL_MS);
-  captReplaySweep.unref?.();
 
   // Periodically (rather than before every single interaction) pick up data changed
   // directly in the database, so manual edits still apply without a restart but without
@@ -2543,7 +2365,7 @@ async function handleInteraction(interaction) {
       return;
     }
 
-    if (["move", "capts"].includes(commandName) && !isLeadership(interaction.member)) {
+    if (commandName === "move" && !isLeadership(interaction.member)) {
       await interaction.reply({ content: noticeMessage("Эту команду может использовать только руководство фамы."), flags: MessageFlags.Ephemeral });
       return;
     }
@@ -2618,41 +2440,6 @@ async function handleInteraction(interaction) {
           )
       );
       await interaction.editReply({ content: successMessage(result.join("\n")) });
-      return;
-    }
-
-    if (commandName === "capts") {
-      const window = getCaptReplayWindow();
-      const nextOpen = !isCaptReplayWindowOpen(window);
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-      if (!nextOpen) {
-        await closeCaptReplayWindow(interaction.guild, window);
-        await sendLog(
-          interaction.guild,
-          new EmbedBuilder()
-            .setColor(0xeb5757)
-            .setTitle("Приём откатов Капт закрыт")
-            .setDescription(`<@${interaction.user.id}> закрыл приём откатов.`)
-        );
-        await interaction.editReply({ content: successMessage("Приём откатов закрыт.") });
-        return;
-      }
-
-      const finalWindow = await openCaptReplayWindow(interaction.guild, interaction.user.id);
-      const expiresAt = captReplayWindowExpiresAt(finalWindow);
-      await sendLog(
-        interaction.guild,
-        new EmbedBuilder()
-          .setColor(0x27ae60)
-          .setTitle("Приём откатов Капт открыт")
-          .setDescription(`<@${interaction.user.id}> открыл приём откатов.`)
-      );
-      await interaction.editReply({
-        content: finalWindow.threadId
-          ? successMessage(`Приём откатов открыт до ${discordTimestampFromMs(expiresAt)}.`)
-          : noticeMessage("Приём открыт, но не удалось создать ветку для откатов — проверьте права бота в канале.")
-      });
       return;
     }
 
@@ -2748,59 +2535,6 @@ async function handleInteraction(interaction) {
       return;
     }
     await interaction.editReply(buildGameAfkPanel(sessions));
-    return;
-  }
-
-  if (interaction.isButton() && interaction.customId === "capt_replay:upload") {
-    // Deliberately no network calls before showModal() - it must be the very
-    // first response to the interaction, within Discord's 3-second window.
-    // The one-per-window check happens on modal submit instead.
-    const window = getCaptReplayWindow();
-    if (!isCaptReplayWindowOpen(window)) {
-      await interaction.reply({ content: noticeMessage("Приём откатов сейчас закрыт."), flags: MessageFlags.Ephemeral });
-      return;
-    }
-    await interaction.showModal(buildCaptReplayModal());
-    return;
-  }
-
-  if (interaction.isModalSubmit() && interaction.customId.startsWith("capt_replay:submit:")) {
-    const window = getCaptReplayWindow();
-    if (!isCaptReplayWindowOpen(window)) {
-      await interaction.reply({ content: noticeMessage("Приём откатов уже закрыт."), flags: MessageFlags.Ephemeral });
-      return;
-    }
-    const rawUrl = interaction.fields.getTextInputValue("url").trim();
-    const parsedUrl = parseYoutubeUrl(rawUrl);
-    if (!parsedUrl) {
-      await interaction.reply({ content: errorMessage("Укажите корректную ссылку на YouTube."), flags: MessageFlags.Ephemeral });
-      return;
-    }
-    // Defer before any network calls - modal submits get the same 3-second window as any
-    // other interaction, and the checks below each cost a Discord API round trip.
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const thread = window.threadId
-      ? await interaction.guild.channels.fetch(window.threadId).catch(() => null)
-      : null;
-    if (!thread?.isThread()) {
-      await interaction.editReply({ content: errorMessage("Не удалось найти ветку для откатов. Обратитесь к руководству.") });
-      return;
-    }
-    if (await hasSubmittedCaptReplay(thread, interaction.user.id)) {
-      await interaction.editReply({ content: noticeMessage("Вы уже отправили откат в этом открытии. Дождитесь следующего.") });
-      return;
-    }
-    await thread.send({
-      content: config.leadershipRoleIds.map((roleId) => `<@&${roleId}>`).join(" "),
-      embeds: [new EmbedBuilder()
-        .setColor(0x000000)
-        .setTitle("Новый откат с капта!")
-        .setDescription(`Отправитель: <@${interaction.user.id}>\nСсылка: ${rawUrl}`)
-        .setFooter({ text: interaction.user.id })
-        .setTimestamp()],
-      allowedMentions: { roles: [...config.leadershipRoleIds] }
-    }).catch(() => null);
-    await interaction.editReply({ content: successMessage("Откат отправлен!") });
     return;
   }
 
