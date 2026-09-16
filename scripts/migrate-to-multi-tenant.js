@@ -186,6 +186,28 @@ async function main() {
       );
     `);
 
+    // rank_role_ids is {"<rank>": {roleIds: [...], label, nicknamePrefix}} -
+    // an arbitrary-length, self-describing structure (any rank count, any
+    // label) rather than a bare role-id map, since a different family can
+    // have a completely different rank ladder (not fixed at 7 like this one).
+    const RANK_LABELS = {
+      5: { label: "High-Staff", nicknamePrefix: "High" },
+      6: { label: "Deputy Leader", nicknamePrefix: "Deputy" },
+      7: { label: "Leader", nicknamePrefix: "Leader" }
+    };
+    function buildRankDefinitions(rankRoleIds) {
+      const result = {};
+      for (const [rank, roleIdOrIds] of Object.entries(rankRoleIds || {})) {
+        const meta = RANK_LABELS[rank] || { label: rank, nicknamePrefix: rank };
+        result[rank] = {
+          roleIds: Array.isArray(roleIdOrIds) ? roleIdOrIds : [roleIdOrIds],
+          label: meta.label,
+          nicknamePrefix: meta.nicknamePrefix
+        };
+      }
+      return result;
+    }
+
     // Seeded from config.json (per-guild leadership/rank roles) plus the
     // channel/role constants that used to be hardcoded at the top of
     // index.js - both only ever described this one guild anyway.
@@ -199,7 +221,7 @@ async function main() {
       [
         DISCORD_GUILD_ID,
         legacyConfig.leadershipRoleIds || [],
-        JSON.stringify(legacyConfig.rankRoleIds || {}),
+        JSON.stringify(buildRankDefinitions(legacyConfig.rankRoleIds)),
         JSON.stringify({ 1: "1290775235360194610", 2: "1290775323373211770" }),
         "1265995505524015245",
         legacyConfig.logChannelId || null,
@@ -209,6 +231,26 @@ async function main() {
         "1291543297747194010"
       ]
     );
+
+    // Reshape rank_role_ids on a row from an earlier version of this
+    // migration, which seeded the old flat {"<rank>": roleId} shape.
+    // Guarded on the actual stored shape (not a version flag) and only
+    // touches that one column, so it never overwrites rank config a family
+    // has since edited themselves through the (future) dashboard - editing
+    // there always produces the new shape already.
+    const { rows: existingConfigRows } = await client.query(
+      `SELECT rank_role_ids FROM guild_config WHERE guild_id = $1`,
+      [DISCORD_GUILD_ID]
+    );
+    const storedRankRoleIds = existingConfigRows[0]?.rank_role_ids;
+    const isOldFlatShape = storedRankRoleIds && Object.keys(storedRankRoleIds).length > 0 &&
+      !Object.values(storedRankRoleIds).some((value) => value && typeof value === "object" && !Array.isArray(value) && "roleIds" in value);
+    if (isOldFlatShape) {
+      await client.query(
+        `UPDATE guild_config SET rank_role_ids = $2, updated_at = now() WHERE guild_id = $1`,
+        [DISCORD_GUILD_ID, JSON.stringify(buildRankDefinitions(storedRankRoleIds))]
+      );
+    }
 
     // 2. Backfill guild_members from the existing single-tenant users table
     // (rank/warning columns stay on `users` too for now - dropped in a

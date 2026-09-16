@@ -156,7 +156,9 @@ CREATE TABLE IF NOT EXISTS guild_bot_settings (
 CREATE TABLE IF NOT EXISTS guild_config (
   guild_id                      TEXT PRIMARY KEY REFERENCES guilds(id) ON DELETE CASCADE,
   leadership_role_ids           TEXT[] NOT NULL DEFAULT '{}',
-  rank_role_ids                 JSONB NOT NULL DEFAULT '{}'::jsonb, -- {"1": "roleId", ..., "5": ["roleId1","roleId2"]}
+  -- {"<rank>": {"roleIds": [...], "label": "...", "nicknamePrefix": "..."}} -
+  -- arbitrary rank count and labels, not a fixed 1-7 ladder.
+  rank_role_ids                 JSONB NOT NULL DEFAULT '{}'::jsonb,
   warn_role_ids                 JSONB NOT NULL DEFAULT '{}'::jsonb, -- {"1": "roleId", "2": "roleId"}
   verified_member_role_id       TEXT,
   log_channel_id                TEXT,

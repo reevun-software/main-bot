@@ -540,22 +540,35 @@ function buildProfileHistory(type, targetId, ownerId, requestedPage) {
   return embedToComponentPayload(embed, components);
 }
 
+// rank_role_ids is {"<rank>": {roleIds: [...], label, nicknamePrefix}} - an
+// arbitrary-length, self-describing ladder (any rank count, any labels),
+// not a fixed 1-7 structure, since a different family's rank ladder can
+// look nothing like this one's.
+function rankDefinitionsFor(guildId) {
+  return getGuildConfig(guildId).rankRoleIds;
+}
+
+function rankOrderFor(guildId) {
+  return Object.keys(rankDefinitionsFor(guildId)).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+}
+
 function rankRoleIdsFor(guildId, rank) {
-  const roleId = getGuildConfig(guildId).rankRoleIds[String(rank)];
-  return roleId ? (Array.isArray(roleId) ? roleId : [roleId]) : [];
+  return rankDefinitionsFor(guildId)[String(rank)]?.roleIds ?? [];
 }
 
 async function syncMemberRankRole(member, rank) {
   if (!member || !rank) return;
-  const configuredRoles = Object.values(getGuildConfig(member.guild.id).rankRoleIds)
-    .flatMap((roleId) => Array.isArray(roleId) ? roleId : [roleId])
+  const definitions = rankDefinitionsFor(member.guild.id);
+  const configuredRoles = Object.values(definitions)
+    .flatMap((def) => def.roleIds ?? [])
     .map((roleId) => member.guild.roles.cache.get(roleId))
     .filter(Boolean);
   const currentRankRoles = configuredRoles.filter((role) => member.roles.cache.has(role.id));
-  // When a rank lists multiple roles (e.g. rank 5: High Staff + Administrator), only the first
-  // one is ever auto-assigned here. The rest are manual-only markers — an admin grants them by
-  // hand and they still count toward that rank, but the bot never adds them on its own. All of
-  // them are still removed automatically once the member leaves that rank.
+  // When a rank lists multiple roles, only the first one is ever
+  // auto-assigned here. The rest are manual-only markers — an admin grants
+  // them by hand and they still count toward that rank, but the bot never
+  // adds them on its own. All of them are still removed automatically once
+  // the member leaves that rank.
   const targetRoleIds = rankRoleIdsFor(member.guild.id, rank);
   const targetRoles = targetRoleIds
     .map((roleId) => member.guild.roles.cache.get(roleId))
@@ -581,11 +594,8 @@ async function syncMemberRankRole(member, rank) {
 function getRankFromMemberRoles(member) {
   if (!member?.roles?.cache || !member.guild) return null;
 
-  const ranks = Object.entries(getGuildConfig(member.guild.id).rankRoleIds)
-    .filter(([, roleId]) => {
-      const roleIds = Array.isArray(roleId) ? roleId : [roleId];
-      return roleIds.some((id) => id && member.roles.cache.has(id));
-    })
+  const ranks = Object.entries(rankDefinitionsFor(member.guild.id))
+    .filter(([, def]) => (def.roleIds ?? []).some((id) => id && member.roles.cache.has(id)))
     .map(([rank]) => Number.parseInt(rank, 10))
     .filter(Number.isFinite);
 
@@ -671,44 +681,31 @@ function validateTicketTransferMember(member, ticket, scope) {
   return null;
 }
 
-function memberHasRank5ManualRole(member) {
-  if (!member?.guild) return false;
-  const manualRoleId = rankRoleIdsFor(member.guild.id, 5)[1];
-  return Boolean(manualRoleId && member?.roles?.cache?.has(manualRoleId));
+function rankDisplayName(guildId, rank) {
+  if (!rank) return "Не в фаме";
+  return rankDefinitionsFor(guildId)[String(rank)]?.label ?? String(rank);
 }
 
-function rankDisplayName(rank, member = null) {
-  if (rank === 5) {
-    return memberHasRank5ManualRole(member) ? "High-Staff (Administrator)" : "High-Staff";
-  }
-  if (rank === 6) return "Deputy Leader";
-  if (rank === 7) return "Leader";
-  return rank ? String(rank) : "Не в фаме";
+function rankNicknamePrefix(guildId, rank) {
+  return rankDefinitionsFor(guildId)[String(rank)]?.nicknamePrefix ?? String(rank);
 }
 
-function rankNicknamePrefix(rank, member = null) {
-  if (rank === 5) return memberHasRank5ManualRole(member) ? "Admin" : "High";
-  if (rank === 6) return "Deputy";
-  if (rank === 7) return "Leader";
-  return String(rank);
-}
-
-function formatFamilyNickname(rank, icName, staticId, member = null) {
+function formatFamilyNickname(guildId, rank, icName, staticId) {
   const normalizedName = String(icName ?? "").trim();
   const normalizedStaticId = String(staticId ?? "").trim();
   if (!rank || !normalizedName || !normalizedStaticId) return null;
-  const prefix = `${rankNicknamePrefix(rank, member)} | `;
+  const prefix = `${rankNicknamePrefix(guildId, rank)} | `;
   const suffix = ` | ${normalizedStaticId}`;
   const availableNameLength = 32 - prefix.length - suffix.length;
   if (availableNameLength < 1) return null;
   return `${prefix}${normalizedName.slice(0, availableNameLength).trim()}${suffix}`;
 }
 
-function buildFamilyNickname(rank, characterInfo, member = null) {
+function buildFamilyNickname(guildId, rank, characterInfo) {
   const [icName, , staticId] = String(characterInfo ?? "")
     .split("/")
     .map((part) => part.trim());
-  return formatFamilyNickname(rank, icName, staticId, member);
+  return formatFamilyNickname(guildId, rank, icName, staticId);
 }
 
 function memberNicknameIdentity(member) {
@@ -731,7 +728,7 @@ function memberNicknameIdentity(member) {
 async function syncMemberRankNickname(member, rank) {
   const identity = memberNicknameIdentity(member);
   if (!identity) return null;
-  const nickname = formatFamilyNickname(rank, identity.icName, identity.staticId, member);
+  const nickname = formatFamilyNickname(member.guild.id, rank, identity.icName, identity.staticId);
   if (!nickname) throw new Error("Не удалось сформировать никнейм участника.");
   if (member.nickname !== nickname) {
     await member.setNickname(nickname, `Синхронизация никнейма с ${rank} рангом`);
@@ -1891,7 +1888,7 @@ function memberEmbed(user, rank, warnCount, member = null) {
     .setThumbnail(user.displayAvatarURL())
     .addFields(
       { name: "Discord", value: `<@${user.id}>`, inline: true },
-      { name: "Ранг", value: rankDisplayName(rank, member), inline: true },
+      { name: "Ранг", value: rankDisplayName(member?.guild?.id, rank), inline: true },
       { name: "Варны", value: String(warnCount), inline: true }
     );
   return embed;
@@ -2191,16 +2188,7 @@ client.on(Events.GuildMemberAdd, (member) => {
 async function handleGuildMemberUpdate(oldMember, newMember) {
   const oldRank = getRankFromMemberRoles(oldMember);
   const newRank = getRankFromMemberRoles(newMember);
-  if (oldRank === newRank) {
-    if (newRank === 5 && memberHasRank5ManualRole(oldMember) !== memberHasRank5ManualRole(newMember)) {
-      // Toggling the manual Administrator role doesn't change the numeric rank (both
-      // roles count as 5), but it does change the "High" / "Admin" nickname prefix.
-      await syncMemberRankNickname(newMember, newRank).catch((error) => {
-        console.error(`Failed to synchronize nickname for ${newMember.id}:`, error);
-      });
-    }
-    return;
-  }
+  if (oldRank === newRank) return;
   if ((botRankChanges.get(newMember.id) ?? 0) > Date.now()) return;
   await reloadStorage();
 
@@ -2646,7 +2634,7 @@ async function handleInteraction(interaction) {
     await interaction.editReply({ content: loadingMessage("Пожалуйста, подождите, изменения применяются...") });
 
     if (system === "rank") {
-      const rankOrder = [1, 2, 3, 4, 5, 6, 7];
+      const rankOrder = rankOrderFor(interaction.guildId);
       const completed = [];
       const failed = [];
       const logLines = [];
@@ -2663,8 +2651,8 @@ async function handleInteraction(interaction) {
           await syncMemberRankRole(member, newRank);
           const syncedNickname = await syncMemberRankNickname(member, newRank);
           await addUserAudit(member.id, "rank", { oldRank, newRank, adminId: interaction.user.id, reason });
-          await dmUser(member, { embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Ваш ранг изменён").setDescription(`**${rankDisplayName(oldRank)} → ${rankDisplayName(newRank)}**`).addFields({ name: "Причина", value: reason }, { name: "Администратор", value: `<@${interaction.user.id}>` })] });
-          completed.push(`<@${member.id}> — **${rankDisplayName(oldRank)} → ${rankDisplayName(newRank)}**${syncedNickname ? `, никнейм: **${syncedNickname}**` : ", никнейм не изменён: IC-имя или Static ID не найдены"}`);
+          await dmUser(member, { embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Ваш ранг изменён").setDescription(`**${rankDisplayName(interaction.guildId, oldRank)} → ${rankDisplayName(interaction.guildId, newRank)}**`).addFields({ name: "Причина", value: reason }, { name: "Администратор", value: `<@${interaction.user.id}>` })] });
+          completed.push(`<@${member.id}> — **${rankDisplayName(interaction.guildId, oldRank)} → ${rankDisplayName(interaction.guildId, newRank)}**${syncedNickname ? `, никнейм: **${syncedNickname}**` : ", никнейм не изменён: IC-имя или Static ID не найдены"}`);
           logLines.push(`<@${member.id}> — **${oldRank} → ${newRank}**`);
         } catch (error) {
           failed.push(`<@${member.id}> — ${error.message}`);
@@ -3117,7 +3105,7 @@ async function handleInteraction(interaction) {
       });
       return;
     }
-    const familyNickname = buildFamilyNickname(rank, application.characterInfo);
+    const familyNickname = buildFamilyNickname(interaction.guildId, rank, application.characterInfo);
     if (!familyNickname) {
       await interaction.followUp({
         content: errorMessage("Не удалось принять заявку: не получилось сформировать никнейм из данных заявки."),
