@@ -53,15 +53,15 @@ async function main() {
       );
     `);
 
-    let familyName = "Family";
+    let legacyConfig = {};
     try {
-      familyName = require(path.join(__dirname, "..", "config.json")).familyName || familyName;
+      legacyConfig = require(path.join(__dirname, "..", "config.json"));
     } catch {
-      // config.json missing/unreadable - fall back to the placeholder name above.
+      // config.json missing/unreadable - guild_config below just gets defaults.
     }
     await client.query(
       `INSERT INTO guilds (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
-      [DISCORD_GUILD_ID, familyName]
+      [DISCORD_GUILD_ID, legacyConfig.familyName || "Family"]
     );
 
     await client.query(`
@@ -169,6 +169,46 @@ async function main() {
         PRIMARY KEY (guild_id, filter_type)
       );
     `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS guild_config (
+        guild_id                      TEXT PRIMARY KEY REFERENCES guilds(id) ON DELETE CASCADE,
+        leadership_role_ids           TEXT[] NOT NULL DEFAULT '{}',
+        rank_role_ids                 JSONB NOT NULL DEFAULT '{}'::jsonb,
+        warn_role_ids                 JSONB NOT NULL DEFAULT '{}'::jsonb,
+        verified_member_role_id       TEXT,
+        log_channel_id                TEXT,
+        applications_channel_id       TEXT,
+        application_panel_channel_id  TEXT,
+        support_panel_channel_id      TEXT,
+        admin_panel_channel_id        TEXT,
+        updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+    `);
+
+    // Seeded from config.json (per-guild leadership/rank roles) plus the
+    // channel/role constants that used to be hardcoded at the top of
+    // index.js - both only ever described this one guild anyway.
+    await client.query(
+      `INSERT INTO guild_config (
+        guild_id, leadership_role_ids, rank_role_ids, warn_role_ids,
+        verified_member_role_id, log_channel_id, applications_channel_id,
+        application_panel_channel_id, support_panel_channel_id, admin_panel_channel_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ON CONFLICT (guild_id) DO NOTHING`,
+      [
+        DISCORD_GUILD_ID,
+        legacyConfig.leadershipRoleIds || [],
+        JSON.stringify(legacyConfig.rankRoleIds || {}),
+        JSON.stringify({ 1: "1290775235360194610", 2: "1290775323373211770" }),
+        "1265995505524015245",
+        legacyConfig.logChannelId || null,
+        legacyConfig.applicationsChannelId || null,
+        "1315860449442398239",
+        "1509572136694452407",
+        "1291543297747194010"
+      ]
+    );
 
     // 2. Backfill guild_members from the existing single-tenant users table
     // (rank/warning columns stay on `users` too for now - dropped in a

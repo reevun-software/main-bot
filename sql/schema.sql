@@ -149,6 +149,24 @@ CREATE TABLE IF NOT EXISTS guild_bot_settings (
   updated_at                   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Bot-operational per-guild config that used to live in the single,
+-- hardcoded config.json - which channel is which panel, which roles mean
+-- what. Replacing this (a JSON file baked into the one deployment) is what
+-- makes the bot able to serve more than one guild at all.
+CREATE TABLE IF NOT EXISTS guild_config (
+  guild_id                      TEXT PRIMARY KEY REFERENCES guilds(id) ON DELETE CASCADE,
+  leadership_role_ids           TEXT[] NOT NULL DEFAULT '{}',
+  rank_role_ids                 JSONB NOT NULL DEFAULT '{}'::jsonb, -- {"1": "roleId", ..., "5": ["roleId1","roleId2"]}
+  warn_role_ids                 JSONB NOT NULL DEFAULT '{}'::jsonb, -- {"1": "roleId", "2": "roleId"}
+  verified_member_role_id       TEXT,
+  log_channel_id                TEXT,
+  applications_channel_id       TEXT,
+  application_panel_channel_id  TEXT,
+  support_panel_channel_id      TEXT,
+  admin_panel_channel_id        TEXT,
+  updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- One row per (guild, module) - a module absent here is enabled by default,
 -- only owner-disabled modules get an explicit row.
 CREATE TABLE IF NOT EXISTS guild_modules (

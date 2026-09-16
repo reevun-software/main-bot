@@ -1,7 +1,5 @@
 require("dotenv").config();
 
-const fs = require("node:fs");
-const path = require("node:path");
 const crypto = require("node:crypto");
 const http = require("node:http");
 const {
@@ -30,7 +28,7 @@ const {
   TextInputBuilder,
   TextInputStyle
 } = require("discord.js");
-const { commands: slashCommandDefinitions, globalCommands: globalSlashCommandDefinitions } = require("./register-commands");
+const { globalCommands: slashCommandDefinitions } = require("./register-commands");
 const {
   closeStorage,
   deleteUserProfile,
@@ -39,6 +37,7 @@ const {
   getApplications,
   getBotInfo,
   getGameAfkSession,
+  getGuildConfig,
   getRankHistory,
   getSupportTickets,
   getUserDb,
@@ -54,14 +53,10 @@ const {
   saveUserDb,
   saveWarnings,
   syncUserProfile,
-  takeExpiredGameAfkSessions
+  takeExpiredGameAfkSessions,
+  upsertGuild
 } = require("./storage");
 
-const configPath = path.join(__dirname, "..", "config.json");
-if (!fs.existsSync(configPath)) {
-  throw new Error("Не найден обязательный файл config.json.");
-}
-const config = require(configPath);
 const applicationEmojis = require("./application-emojis.json");
 
 function applicationEmoji(name) {
@@ -219,10 +214,6 @@ const client = new Client({
 });
 
 const APPLICATION_REJECTION_COOLDOWN_MS = 10 * 24 * 60 * 60 * 1000;
-const APPLICATION_PANEL_CHANNEL_ID = "1315860449442398239";
-const SUPPORT_PANEL_CHANNEL_ID = "1509572136694452407";
-const ADMIN_PANEL_CHANNEL_ID = "1291543297747194010";
-const VERIFIED_MEMBER_ROLE_ID = "1265995505524015245";
 const SUPPORT_REQUEST_TYPES = {
   bonus: "Заявка на получение премии",
   vacation: "Заявка на отпуск",
@@ -339,15 +330,12 @@ const SUPPORT_TYPE_FIELDS = {
 const GAME_AFK_SWEEP_INTERVAL_MS = 30 * 1000;
 const STORAGE_RELOAD_INTERVAL_MS = 60 * 1000;
 const GAME_AFK_MAX_HOURS = 4;
-const WARN_ROLE_IDS = {
-  1: "1290775235360194610",
-  2: "1290775323373211770"
-};
 const botRankChanges = new Map();
 
 function isLeadership(member) {
-  return Boolean(member?.roles?.cache) &&
-    config.leadershipRoleIds.some((roleId) => member.roles.cache.has(roleId));
+  if (!member?.roles?.cache || !member.guild) return false;
+  const { leadershipRoleIds } = getGuildConfig(member.guild.id);
+  return leadershipRoleIds.some((roleId) => member.roles.cache.has(roleId));
 }
 
 function isApplicationReviewer(member) {
@@ -552,14 +540,14 @@ function buildProfileHistory(type, targetId, ownerId, requestedPage) {
   return embedToComponentPayload(embed, components);
 }
 
-function rankRoleIdsFor(rank) {
-  const roleId = config.rankRoleIds[String(rank)];
+function rankRoleIdsFor(guildId, rank) {
+  const roleId = getGuildConfig(guildId).rankRoleIds[String(rank)];
   return roleId ? (Array.isArray(roleId) ? roleId : [roleId]) : [];
 }
 
 async function syncMemberRankRole(member, rank) {
   if (!member || !rank) return;
-  const configuredRoles = Object.values(config.rankRoleIds)
+  const configuredRoles = Object.values(getGuildConfig(member.guild.id).rankRoleIds)
     .flatMap((roleId) => Array.isArray(roleId) ? roleId : [roleId])
     .map((roleId) => member.guild.roles.cache.get(roleId))
     .filter(Boolean);
@@ -568,7 +556,7 @@ async function syncMemberRankRole(member, rank) {
   // one is ever auto-assigned here. The rest are manual-only markers — an admin grants them by
   // hand and they still count toward that rank, but the bot never adds them on its own. All of
   // them are still removed automatically once the member leaves that rank.
-  const targetRoleIds = rankRoleIdsFor(rank);
+  const targetRoleIds = rankRoleIdsFor(member.guild.id, rank);
   const targetRoles = targetRoleIds
     .map((roleId) => member.guild.roles.cache.get(roleId))
     .filter(Boolean);
@@ -591,9 +579,9 @@ async function syncMemberRankRole(member, rank) {
 }
 
 function getRankFromMemberRoles(member) {
-  if (!member?.roles?.cache) return null;
+  if (!member?.roles?.cache || !member.guild) return null;
 
-  const ranks = Object.entries(config.rankRoleIds)
+  const ranks = Object.entries(getGuildConfig(member.guild.id).rankRoleIds)
     .filter(([, roleId]) => {
       const roleIds = Array.isArray(roleId) ? roleId : [roleId];
       return roleIds.some((id) => id && member.roles.cache.has(id));
@@ -684,7 +672,8 @@ function validateTicketTransferMember(member, ticket, scope) {
 }
 
 function memberHasRank5ManualRole(member) {
-  const manualRoleId = rankRoleIdsFor(5)[1];
+  if (!member?.guild) return false;
+  const manualRoleId = rankRoleIdsFor(member.guild.id, 5)[1];
   return Boolean(manualRoleId && member?.roles?.cache?.has(manualRoleId));
 }
 
@@ -756,10 +745,11 @@ async function getRankFromUser(guild, userId) {
 }
 
 function getWarnCountFromMemberRoles(member) {
-  if (!member?.roles?.cache) return 0;
+  if (!member?.roles?.cache || !member.guild) return 0;
 
+  const warnRoleIds = getGuildConfig(member.guild.id).warnRoleIds;
   for (const warnCount of [2, 1]) {
-    const roleId = WARN_ROLE_IDS[warnCount];
+    const roleId = warnRoleIds[warnCount];
     if (roleId && member.roles.cache.has(roleId)) return warnCount;
   }
 
@@ -824,13 +814,14 @@ async function syncGuildStateFromRoles(guild) {
 async function syncWarnRoles(member, warnCount) {
   if (!member) return;
 
-  for (const roleId of Object.values(WARN_ROLE_IDS)) {
+  const warnRoleIds = getGuildConfig(member.guild.id).warnRoleIds;
+  for (const roleId of Object.values(warnRoleIds)) {
     if (roleId && member.roles.cache.has(roleId)) {
       await member.roles.remove(roleId);
     }
   }
 
-  const roleId = WARN_ROLE_IDS[warnCount];
+  const roleId = warnRoleIds[warnCount];
   if (roleId) await member.roles.add(roleId);
 }
 
@@ -873,7 +864,7 @@ function buildApplicationMessagePayload(application, user = null) {
     )
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
-        `-# ${config.leadershipRoleIds.map((roleId) => `<@&${roleId}>`).join(" · ")}`
+        `-# ${getGuildConfig(application.guildId).leadershipRoleIds.map((roleId) => `<@&${roleId}>`).join(" · ")}`
       )
     );
   if (!closed) container.addActionRowComponents(...applicationButtons(application));
@@ -882,7 +873,7 @@ function buildApplicationMessagePayload(application, user = null) {
     embeds: [],
     components: [container],
     flags: MessageFlags.IsComponentsV2,
-    allowedMentions: { roles: [...config.leadershipRoleIds] }
+    allowedMentions: { roles: [...getGuildConfig(application.guildId).leadershipRoleIds] }
   };
 }
 
@@ -1517,7 +1508,7 @@ async function ensureTicketReviewerParentAccess(parent, reviewerRoleIds) {
   }));
 }
 
-async function createPrivateTicketThread(interaction, name, reviewerRoleIds = config.leadershipRoleIds) {
+async function createPrivateTicketThread(interaction, name, reviewerRoleIds = getGuildConfig(interaction.guildId).leadershipRoleIds) {
   const parent = interaction.channel;
   if (!parent?.isTextBased() || !parent.threads) {
     throw new Error("Панель заявок должна находиться в обычном текстовом канале с поддержкой веток.");
@@ -1542,7 +1533,7 @@ async function createApplicationChannel(interaction, uid) {
 }
 
 async function refreshApplicationPanel(guild) {
-  const channel = await guild.channels.fetch(APPLICATION_PANEL_CHANNEL_ID).catch(() => null);
+  const channel = await guild.channels.fetch(getGuildConfig(guild.id).applicationPanelChannelId).catch(() => null);
   if (!channel?.isTextBased()) return null;
   const messages = await channel.messages.fetch({ limit: 100 }).catch(() => null);
   const panels = messages?.filter((message) => {
@@ -1582,6 +1573,11 @@ async function refreshStaticPanel(guild, channelId, componentId, payloadBuilder)
 async function processExpiredGameAfkSessions(clientInstance) {
   const expired = await takeExpiredGameAfkSessions();
   if (!expired.length) return;
+  // KNOWN GAP: afk_sessions is still keyed only by user_id in storage.js
+  // (not (guild_id, user_id)), so this can't yet look up "which guild does
+  // this session belong to" - it still assumes the one guild from
+  // DISCORD_GUILD_ID. Needs its own migration (composite PK) + storage.js
+  // rewrite before this is truly multi-tenant; tracked as follow-up work.
   const guild = await clientInstance.guilds.fetch(process.env.DISCORD_GUILD_ID).catch(() => null);
   if (!guild) return;
 
@@ -1616,7 +1612,7 @@ function buildSupportTicketMessagePayload(ticket, user) {
   };
   const closed = ticket.status === "closed";
   const reviewerMention = ticket.status === "new"
-    ? ` | ${config.leadershipRoleIds.map((roleId) => `<@&${roleId}>`).join(" ")}`
+    ? ` | ${getGuildConfig(ticket.guildId).leadershipRoleIds.map((roleId) => `<@&${roleId}>`).join(" ")}`
     : "";
   const container = new ContainerBuilder()
     .setAccentColor(0x000000)
@@ -1644,7 +1640,7 @@ function buildSupportTicketMessagePayload(ticket, user) {
     embeds: [],
     components: [container],
     flags: MessageFlags.IsComponentsV2,
-    allowedMentions: { roles: [...config.leadershipRoleIds] }
+    allowedMentions: { roles: [...getGuildConfig(ticket.guildId).leadershipRoleIds] }
   };
 }
 
@@ -1724,6 +1720,7 @@ async function createGeneralSupportTicket(interaction, requestType, details) {
   const ticketId = `${interaction.user.id}-${Date.now()}`;
   const ticket = {
     id: ticketId,
+    guildId: interaction.guildId,
     uid,
     userId: interaction.user.id,
     status: "new",
@@ -1876,8 +1873,9 @@ async function synchronizeStoredTicketThreads(guild) {
 }
 
 async function sendLog(guild, embed) {
-  if (!config.logChannelId) return;
-  const channel = await guild.channels.fetch(config.logChannelId).catch(() => null);
+  const { logChannelId } = getGuildConfig(guild.id);
+  if (!logChannelId) return;
+  const channel = await guild.channels.fetch(logChannelId).catch(() => null);
   if (channel?.isTextBased()) {
     await channel.send({
       embeds: [embed],
@@ -1900,21 +1898,58 @@ function memberEmbed(user, rank, warnCount, member = null) {
 }
 
 async function registerSlashCommands() {
-  const { DISCORD_TOKEN, DISCORD_CLIENT_ID, DISCORD_GUILD_ID } = process.env;
-  if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DISCORD_GUILD_ID) {
-    console.error("Не удалось авто-зарегистрировать slash-команды: не заданы DISCORD_TOKEN, DISCORD_CLIENT_ID или DISCORD_GUILD_ID.");
+  const { DISCORD_TOKEN, DISCORD_CLIENT_ID } = process.env;
+  if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID) {
+    console.error("Не удалось авто-зарегистрировать slash-команды: не заданы DISCORD_TOKEN или DISCORD_CLIENT_ID.");
     return;
   }
   const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
-  await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID), {
+  await rest.put(Routes.applicationCommands(DISCORD_CLIENT_ID), {
     body: slashCommandDefinitions
   });
-  await rest.put(Routes.applicationCommands(DISCORD_CLIENT_ID), {
-    body: globalSlashCommandDefinitions
+  console.log(`Slash-команды зарегистрированы автоматически: ${slashCommandDefinitions.length} глобальных.`);
+}
+
+// Runs the per-guild boot sequence (panels, role sync, ticket thread sync)
+// for one guild - called once per guild the bot is actually in, instead of
+// once for a single hardcoded DISCORD_GUILD_ID.
+async function initializeGuild(guild) {
+  await processExpiredGameAfkSessions(guild.client).catch((error) => {
+    console.error(`[${guild.id}] Не удалось обработать просроченные AFK-сессии при старте:`, error);
   });
-  console.log(
-    `Slash-команды зарегистрированы автоматически: ${slashCommandDefinitions.length} гильдийных, ${globalSlashCommandDefinitions.length} глобальных.`
-  );
+
+  const { leadershipRoleIds, applicationPanelChannelId, supportPanelChannelId, adminPanelChannelId } = getGuildConfig(guild.id);
+  const applicationParent = applicationPanelChannelId
+    ? await guild.channels.fetch(applicationPanelChannelId).catch(() => null)
+    : null;
+  if (applicationParent?.isTextBased()) {
+    await ensureTicketReviewerParentAccess(applicationParent, leadershipRoleIds).catch((error) => {
+      console.error(`[${guild.id}] Не удалось выдать доступ к панели заявок:`, error);
+    });
+    await refreshApplicationPanel(guild).catch((error) => {
+      console.error(`[${guild.id}] Не удалось обновить панель заявок:`, error);
+    });
+  } else if (applicationPanelChannelId) {
+    console.error(`[${guild.id}] Канал панели заявок (${applicationPanelChannelId}) недоступен: проверьте права бота и ID канала.`);
+  }
+
+  if (supportPanelChannelId) {
+    await refreshStaticPanel(guild, supportPanelChannelId, "support:create", buildSupportPanel).catch((error) => {
+      console.error(`[${guild.id}] Не удалось обновить панель поддержки:`, error);
+    });
+  }
+  if (adminPanelChannelId) {
+    await refreshStaticPanel(guild, adminPanelChannelId, "admin:warn", buildAdminPanel).catch((error) => {
+      console.error(`[${guild.id}] Не удалось обновить админ-панель:`, error);
+    });
+  }
+
+  await syncGuildStateFromRoles(guild).catch((error) => {
+    console.error(`[${guild.id}] Не удалось синхронизировать состояние по ролям:`, error);
+  });
+  await synchronizeStoredTicketThreads(guild).catch((error) => {
+    console.error(`[${guild.id}] Не удалось синхронизировать ветки обращений:`, error);
+  });
 }
 
 async function handleClientReady(readyClient) {
@@ -1922,37 +1957,12 @@ async function handleClientReady(readyClient) {
   await registerSlashCommands().catch((error) => {
     console.error("Не удалось авто-зарегистрировать slash-команды:", error);
   });
-  const guildId = process.env.DISCORD_GUILD_ID;
-  const guild = guildId ? await readyClient.guilds.fetch(guildId).catch(() => null) : null;
-  if (guild) {
-    await processExpiredGameAfkSessions(readyClient).catch((error) => {
-      console.error("Не удалось обработать просроченные AFK-сессии при старте:", error);
+  for (const guild of readyClient.guilds.cache.values()) {
+    await upsertGuild({ id: guild.id, name: guild.name, icon: guild.icon, ownerDiscordId: guild.ownerId }).catch((error) => {
+      console.error(`[${guild.id}] Не удалось зарегистрировать гильдию:`, error);
     });
-
-    const applicationParent = await guild.channels.fetch(APPLICATION_PANEL_CHANNEL_ID).catch(() => null);
-    if (applicationParent?.isTextBased()) {
-      await ensureTicketReviewerParentAccess(applicationParent, config.leadershipRoleIds).catch((error) => {
-        console.error("Не удалось выдать доступ к панели заявок:", error);
-      });
-      await refreshApplicationPanel(guild).catch((error) => {
-        console.error("Не удалось обновить панель заявок:", error);
-      });
-    } else {
-      console.error(`Канал панели заявок (${APPLICATION_PANEL_CHANNEL_ID}) недоступен: проверьте права бота и ID канала.`);
-    }
-
-    await refreshStaticPanel(guild, SUPPORT_PANEL_CHANNEL_ID, "support:create", buildSupportPanel).catch((error) => {
-      console.error("Не удалось обновить панель поддержки:", error);
-    });
-    await refreshStaticPanel(guild, ADMIN_PANEL_CHANNEL_ID, "admin:warn", buildAdminPanel).catch((error) => {
-      console.error("Не удалось обновить админ-панель:", error);
-    });
-
-    await syncGuildStateFromRoles(guild).catch((error) => {
-      console.error("Не удалось синхронизировать состояние по ролям:", error);
-    });
-    await synchronizeStoredTicketThreads(guild).catch((error) => {
-      console.error("Не удалось синхронизировать ветки обращений:", error);
+    await initializeGuild(guild).catch((error) => {
+      console.error(`[${guild.id}] Ошибка инициализации гильдии при старте:`, error);
     });
   }
   const gameAfkSweep = setInterval(() => {
@@ -1977,6 +1987,18 @@ client.once(Events.ClientReady, (readyClient) => {
   handleClientReady(readyClient).catch((error) => {
     console.error("Bot initialization after login failed:", error);
   });
+});
+
+// A guild the bot is added to after boot never goes through
+// handleClientReady's loop - this is that same registration + panel setup,
+// run once for just the new guild.
+client.on(Events.GuildCreate, (guild) => {
+  upsertGuild({ id: guild.id, name: guild.name, icon: guild.icon, ownerDiscordId: guild.ownerId })
+    .then(() => reloadStorage())
+    .then(() => initializeGuild(guild))
+    .catch((error) => {
+      console.error(`[${guild.id}] Не удалось инициализировать новую гильдию:`, error);
+    });
 });
 
 client.on(Events.Error, (error) => {
@@ -3113,7 +3135,10 @@ async function handleInteraction(interaction) {
       return;
     }
     try {
-      await member.roles.add(VERIFIED_MEMBER_ROLE_ID, `Принята заявка в ${applicationSectionLabel(application.requestType)}`);
+      const { verifiedMemberRoleId } = getGuildConfig(member.guild.id);
+      if (verifiedMemberRoleId) {
+        await member.roles.add(verifiedMemberRoleId, `Принята заявка в ${applicationSectionLabel(application.requestType)}`);
+      }
       const oldRank = getRankFromMemberRoles(member);
       await syncMemberRankRole(member, rank);
       await addUserAudit(member.id, "rank", {
@@ -3580,6 +3605,7 @@ async function handleInteraction(interaction) {
     const applicationKey = `${interaction.user.id}-${Date.now()}`;
     const channel = await createApplicationChannel(interaction, uid);
     const application = {
+      guildId: interaction.guildId,
       userId: interaction.user.id,
       uid,
       channelId: channel.id,
@@ -3608,7 +3634,7 @@ async function handleInteraction(interaction) {
       buildApplicationDmEmbed(
         application,
         "Заявка создана",
-        `Ваша заявка в **${config.familyName}** создана и направлена администрации. Ожидайте начала рассмотрения.`,
+        `Ваша заявка в **${interaction.guild.name}** создана и направлена администрации. Ожидайте начала рассмотрения.`,
         0x56ccf2,
         [
           { name: "Статус", value: applicationStatusLabel(application.status), inline: true }
@@ -3619,8 +3645,9 @@ async function handleInteraction(interaction) {
       console.error(`Failed to disable invitations for ticket thread ${channel.id}:`, error);
     });
 
-    const applicationsChannel = config.applicationsChannelId
-      ? await interaction.guild.channels.fetch(config.applicationsChannelId).catch(() => null)
+    const applicationsChannelId = getGuildConfig(interaction.guildId).applicationsChannelId;
+    const applicationsChannel = applicationsChannelId
+      ? await interaction.guild.channels.fetch(applicationsChannelId).catch(() => null)
       : null;
     if (applicationsChannel?.isTextBased() && applicationsChannel.id !== channel.id) {
       const announcement = await applicationsChannel.send(
@@ -3639,7 +3666,7 @@ async function handleInteraction(interaction) {
       new EmbedBuilder()
         .setColor(0x56ccf2)
         .setTitle(`Заявка на вступление | ${uid}`)
-        .setDescription(`<@${interaction.user.id}> создал заявку в ${config.familyName}.`)
+        .setDescription(`<@${interaction.user.id}> создал заявку в ${interaction.guild.name}.`)
         .addFields(
           { name: "UID", value: uid, inline: true },
           { name: "Состав", value: applicationSectionLabel(application.requestType), inline: true },

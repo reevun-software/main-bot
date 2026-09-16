@@ -7,6 +7,7 @@ const ROOT = path.join(__dirname, "..");
 const state = {
   applications: {},
   botInfo: {},
+  guildConfigs: {}, // guildId -> per-guild config (replaces the old single config.json)
   ranks: {},
   supportTickets: {},
   users: {},
@@ -135,6 +136,7 @@ async function initStorage() {
 function resetState() {
   state.applications = {};
   state.botInfo = {};
+  state.guildConfigs = {};
   state.ranks = {};
   state.supportTickets = {};
   state.users = {};
@@ -163,6 +165,22 @@ async function loadState() {
     captUpdatedAt: isoDate(captSettings?.updated_at),
     rpUpdatedAt: isoDate(rpSettings?.updated_at)
   };
+
+  const { rows: guildConfigRows } = await pool.query("SELECT * FROM guild_config");
+  state.guildConfigs = {};
+  for (const row of guildConfigRows) {
+    state.guildConfigs[row.guild_id] = {
+      leadershipRoleIds: row.leadership_role_ids ?? [],
+      rankRoleIds: row.rank_role_ids ?? {},
+      warnRoleIds: row.warn_role_ids ?? {},
+      verifiedMemberRoleId: row.verified_member_role_id,
+      logChannelId: row.log_channel_id,
+      applicationsChannelId: row.applications_channel_id,
+      applicationPanelChannelId: row.application_panel_channel_id,
+      supportPanelChannelId: row.support_panel_channel_id,
+      adminPanelChannelId: row.admin_panel_channel_id
+    };
+  }
 
   const { rows: users } = await pool.query("SELECT * FROM users");
   for (const row of users) {
@@ -207,6 +225,7 @@ async function loadState() {
   for (const row of ticketRows) {
     if (row.category === "application") {
       state.applications[row.ticket_key] = {
+        guildId: row.guild_id,
         userId: row.user_id,
         uid: row.uid,
         status: row.status,
@@ -231,6 +250,7 @@ async function loadState() {
     } else if (row.category === "support") {
       state.supportTickets[row.ticket_key] = {
         id: row.ticket_key,
+        guildId: row.guild_id,
         uid: row.uid,
         userId: row.user_id,
         status: row.status,
@@ -251,6 +271,38 @@ async function loadState() {
 
 function getWarnings() { return state.warnings; }
 function getBotInfo() { return state.botInfo; }
+
+const EMPTY_GUILD_CONFIG = {
+  leadershipRoleIds: [],
+  rankRoleIds: {},
+  warnRoleIds: {},
+  verifiedMemberRoleId: null,
+  logChannelId: null,
+  applicationsChannelId: null,
+  applicationPanelChannelId: null,
+  supportPanelChannelId: null,
+  adminPanelChannelId: null
+};
+// A guild with no row yet (bot just joined, dashboard not configured) gets
+// an empty-but-shaped config rather than undefined, so callers can always
+// read e.g. `.leadershipRoleIds` without a null check.
+function getGuildConfig(guildId) { return state.guildConfigs[guildId] ?? EMPTY_GUILD_CONFIG; }
+
+// Registers a guild the bot is in (called on boot for every guild already
+// joined, and on guildCreate for one newly joined) - every other
+// guild-scoped table FKs into this one, so it must exist before anything
+// else is written for that guild.
+function upsertGuild({ id, name, icon = null, ownerDiscordId = null }) {
+  return queueWrite("upsert guild", () =>
+    pool.query(
+      `INSERT INTO guilds (id, name, icon, owner_discord_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, icon = EXCLUDED.icon, owner_discord_id = EXCLUDED.owner_discord_id`,
+      [id, name, icon, ownerDiscordId]
+    )
+  );
+}
+
 function getApplications() { return state.applications; }
 function getUserDb() { return state.users; }
 function getRankHistory() { return state.ranks; }
@@ -540,12 +592,12 @@ function saveApplications(applications) {
         .map((part) => part.trim());
       await client.query(
          `INSERT INTO tickets
-         (category, ticket_key, uid, user_id, status, request_type, ic_name, character_level,
+         (category, guild_id, ticket_key, uid, user_id, status, request_type, ic_name, character_level,
           character_static_id, capt_role, ooc_age, details, claimed_by, decided_by, decision_reason,
           channel_id, message_id, announcement_channel_id, announcement_message_id,
           created_at, updated_at, closed_at)
-         VALUES ('application', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
-        [applicationKey, application.uid ?? null, application.userId,
+         VALUES ('application', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
+        [application.guildId ?? null, applicationKey, application.uid ?? null, application.userId,
           application.status ?? "new", application.requestType ?? "rp", characterParts[0] || null,
           characterParts[1] || null, characterParts[2] || null, application.captRole ?? null,
           application.oocAge ?? null,
@@ -569,11 +621,11 @@ function saveSupportTickets(tickets) {
     for (const [ticketId, ticket] of Object.entries(tickets)) {
       await client.query(
         `INSERT INTO tickets
-         (category, ticket_key, uid, user_id, status, request_type, details,
+         (category, guild_id, ticket_key, uid, user_id, status, request_type, details,
           claimed_by, decided_by, decision_reason, channel_id, message_id,
           created_at, updated_at, closed_at)
-         VALUES ('support', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-        [ticket.id ?? ticketId, ticket.uid ?? null, ticket.userId,
+         VALUES ('support', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+        [ticket.guildId ?? null, ticket.id ?? ticketId, ticket.uid ?? null, ticket.userId,
           ticket.status ?? "new", ticket.requestType ?? null, ticket.details ?? null,
           ticket.claimedBy ?? null,
           ticket.closedBy ?? null,
@@ -603,6 +655,7 @@ module.exports = {
   getApplications,
   getBotInfo,
   getGameAfkSession,
+  getGuildConfig,
   getRankHistory,
   getSupportTickets,
   getUserDb,
@@ -618,5 +671,6 @@ module.exports = {
   saveUserDb,
   saveWarnings,
   syncUserProfile,
-  takeExpiredGameAfkSessions
+  takeExpiredGameAfkSessions,
+  upsertGuild
 };
