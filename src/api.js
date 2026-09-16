@@ -1,14 +1,25 @@
-// Minimal HTTP API so the web dashboard can read/write per-guild bot
-// config (roles, channels) instead of that data living only in the bot's
-// own database with no UI. Reachable only over Railway's private network
-// (main-bot.railway.internal is not resolvable from the public internet),
-// plus a shared-secret header as defense in depth. No framework - a
-// handful of routes doesn't need one, and this repo has stayed
-// dependency-light on purpose.
+// Minimal HTTP API so the web dashboard can read/write bot-owned data
+// (config, members, warnings, tickets, afk sessions, bans) instead of that
+// data living only in the bot's own database with no UI, or worse, the
+// dashboard keeping a second copy of it that the bot never writes to.
+// Reachable only over Railway's private network (main-bot.railway.internal
+// is not resolvable from the public internet), plus a shared-secret header
+// as defense in depth. No framework - this repo has stayed
+// dependency-light on purpose, and the route count doesn't need one yet.
 const http = require("node:http");
-const { getGuildConfig, updateGuildConfig } = require("./storage");
+const {
+  addBanForGuild,
+  getAfkSessionsForApi,
+  getAuditLogForGuild,
+  getBansForGuild,
+  getGuildConfig,
+  getGuildMembersForApi,
+  getTicketsForGuild,
+  removeBanForGuild,
+  updateGuildConfig
+} = require("./storage");
 
-const PATCHABLE_FIELDS = new Set([
+const PATCHABLE_CONFIG_FIELDS = new Set([
   "leadershipRoleIds",
   "rankRoleIds",
   "warnRoleIds",
@@ -60,46 +71,77 @@ function channelSummary(channel) {
   return { id: channel.id, name: channel.name, type: channel.type };
 }
 
+async function handleConfig(client, req, res, guildId) {
+  if (req.method === "GET") return sendJson(res, 200, getGuildConfig(guildId));
+  if (req.method === "PUT") {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    const patch = {};
+    for (const key of Object.keys(body)) {
+      if (PATCHABLE_CONFIG_FIELDS.has(key)) patch[key] = body[key];
+    }
+    if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No recognized fields in body" });
+    return sendJson(res, 200, await updateGuildConfig(guildId, patch));
+  }
+  return sendJson(res, 405, { error: "Method not allowed" });
+}
+
+async function handleBans(req, res, guildId) {
+  if (req.method === "GET") return sendJson(res, 200, await getBansForGuild(guildId));
+  if (req.method === "POST") {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    if (!body.reason || (!body.discordUserId && !body.characterName) || !body.issuedBy) {
+      return sendJson(res, 400, { error: "reason, issuedBy, and one of discordUserId/characterName are required" });
+    }
+    return sendJson(res, 201, await addBanForGuild(guildId, body));
+  }
+  return sendJson(res, 405, { error: "Method not allowed" });
+}
+
 async function handleApiRequest(client, req, res, url) {
   if (!isAuthorized(req)) return sendJson(res, 401, { error: "Unauthorized" });
 
-  const guildMatch = url.pathname.match(/^\/api\/guilds\/(\d+)\/(config|roles|channels)$/);
-  if (!guildMatch) return sendJson(res, 404, { error: "Not found" });
-  const [, guildId, resource] = guildMatch;
+  const segments = url.pathname.split("/").filter(Boolean); // ["api", "guilds", ":id", resource, ...rest]
+  if (segments[0] !== "api" || segments[1] !== "guilds" || !/^\d+$/.test(segments[2] ?? "")) {
+    return sendJson(res, 404, { error: "Not found" });
+  }
+  const guildId = segments[2];
+  const resource = segments[3];
+  const rest = segments.slice(4);
 
-  if (resource === "config") {
-    if (req.method === "GET") {
-      return sendJson(res, 200, getGuildConfig(guildId));
-    }
-    if (req.method === "PUT") {
-      let body;
-      try {
-        body = await readJsonBody(req);
-      } catch (error) {
-        return sendJson(res, 400, { error: error.message });
-      }
-      const patch = {};
-      for (const key of Object.keys(body)) {
-        if (PATCHABLE_FIELDS.has(key)) patch[key] = body[key];
-      }
-      if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No recognized fields in body" });
-      const updated = await updateGuildConfig(guildId, patch);
-      return sendJson(res, 200, updated);
-    }
-    return sendJson(res, 405, { error: "Method not allowed" });
+  if (resource === "config") return handleConfig(client, req, res, guildId);
+  if (resource === "bans" && rest.length === 0) return handleBans(req, res, guildId);
+  if (resource === "bans" && rest.length === 1 && req.method === "DELETE") {
+    await removeBanForGuild(guildId, rest[0]);
+    res.writeHead(204).end();
+    return;
   }
 
   if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
 
+  if (resource === "members") return sendJson(res, 200, await getGuildMembersForApi(guildId));
+  if (resource === "audit-log") return sendJson(res, 200, await getAuditLogForGuild(guildId, Number(url.searchParams.get("limit")) || 50));
+  if (resource === "afk-sessions") return sendJson(res, 200, await getAfkSessionsForApi(guildId));
+  if (resource === "tickets") return sendJson(res, 200, await getTicketsForGuild(guildId, url.searchParams.get("category") || undefined));
+
   const guild = client.guilds.cache.get(guildId);
   if (!guild) return sendJson(res, 404, { error: "Bot is not in that guild" });
 
-  if (resource === "roles") {
-    return sendJson(res, 200, [...guild.roles.cache.values()].map(roleSummary));
-  }
+  if (resource === "roles") return sendJson(res, 200, [...guild.roles.cache.values()].map(roleSummary));
   if (resource === "channels") {
     return sendJson(res, 200, [...guild.channels.cache.values()].filter((c) => c.isTextBased() && !c.isThread()).map(channelSummary));
   }
+
+  return sendJson(res, 404, { error: "Not found" });
 }
 
 function startApiAndHealthServer(client) {

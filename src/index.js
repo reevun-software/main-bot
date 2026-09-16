@@ -1125,11 +1125,11 @@ function gameAfkTimestamp(value, style = "R") {
 
 const AFK_LOOKUP_TIMEOUT = Symbol("afk-lookup-timeout");
 
-async function getGameAfkSessionQuick(userId, timeoutMs = 750) {
+async function getGameAfkSessionQuick(guildId, userId, timeoutMs = 750) {
   let timer;
   try {
     return await Promise.race([
-      getGameAfkSession(userId).catch(() => AFK_LOOKUP_TIMEOUT),
+      getGameAfkSession(guildId, userId).catch(() => AFK_LOOKUP_TIMEOUT),
       new Promise((resolve) => {
         timer = setTimeout(() => resolve(AFK_LOOKUP_TIMEOUT), timeoutMs);
         timer.unref?.();
@@ -1567,19 +1567,12 @@ async function refreshStaticPanel(guild, channelId, componentId, payloadBuilder)
   return channel.send(payloadBuilder());
 }
 
-async function processExpiredGameAfkSessions(clientInstance) {
-  const expired = await takeExpiredGameAfkSessions();
+async function processExpiredGameAfkSessions(guild) {
+  const expired = await takeExpiredGameAfkSessions(guild.id);
   if (!expired.length) return;
-  // KNOWN GAP: afk_sessions is still keyed only by user_id in storage.js
-  // (not (guild_id, user_id)), so this can't yet look up "which guild does
-  // this session belong to" - it still assumes the one guild from
-  // DISCORD_GUILD_ID. Needs its own migration (composite PK) + storage.js
-  // rewrite before this is truly multi-tenant; tracked as follow-up work.
-  const guild = await clientInstance.guilds.fetch(process.env.DISCORD_GUILD_ID).catch(() => null);
-  if (!guild) return;
 
   for (const session of expired) {
-    const user = await clientInstance.users.fetch(session.userId).catch(() => null);
+    const user = await guild.client.users.fetch(session.userId).catch(() => null);
     if (user) {
       await user.send({
         embeds: [new EmbedBuilder()
@@ -1911,7 +1904,7 @@ async function registerSlashCommands() {
 // for one guild - called once per guild the bot is actually in, instead of
 // once for a single hardcoded DISCORD_GUILD_ID.
 async function initializeGuild(guild) {
-  await processExpiredGameAfkSessions(guild.client).catch((error) => {
+  await processExpiredGameAfkSessions(guild).catch((error) => {
     console.error(`[${guild.id}] Не удалось обработать просроченные AFK-сессии при старте:`, error);
   });
 
@@ -1963,9 +1956,11 @@ async function handleClientReady(readyClient) {
     });
   }
   const gameAfkSweep = setInterval(() => {
-    processExpiredGameAfkSessions(readyClient).catch((error) => {
-      console.error("Failed to process expired AFK sessions:", error);
-    });
+    for (const guild of readyClient.guilds.cache.values()) {
+      processExpiredGameAfkSessions(guild).catch((error) => {
+        console.error(`[${guild.id}] Failed to process expired AFK sessions:`, error);
+      });
+    }
   }, GAME_AFK_SWEEP_INTERVAL_MS);
   gameAfkSweep.unref?.();
 
@@ -2268,10 +2263,10 @@ async function handleInteraction(interaction) {
     return;
   }
   if (interaction.isButton() && interaction.customId === "game_afk:return" && !interaction._confirmed) {
-    const current = await getGameAfkSessionQuick(interaction.user.id);
+    const current = await getGameAfkSessionQuick(interaction.guildId, interaction.user.id);
     if (current !== AFK_LOOKUP_TIMEOUT && (!current || Date.parse(current.expiresAt) <= Date.now())) {
       if (current) {
-        void removeGameAfkSession(interaction.user.id);
+        void removeGameAfkSession(interaction.guildId, interaction.user.id);
       }
       await interaction.reply({
         content: noticeMessage("Вы сейчас не находитесь в AFK."),
@@ -2288,7 +2283,7 @@ async function handleInteraction(interaction) {
   }
 
   if (interaction.isButton() && interaction.customId === "game_afk:start") {
-    const current = await getGameAfkSessionQuick(interaction.user.id);
+    const current = await getGameAfkSessionQuick(interaction.guildId, interaction.user.id);
     if (current !== AFK_LOOKUP_TIMEOUT && current && Date.parse(current.expiresAt) > Date.now()) {
       await interaction.reply({
         content: noticeMessage(`Вы уже находитесь в AFK и вернётесь ${gameAfkTimestamp(current.expiresAt)}.`),
@@ -2296,19 +2291,19 @@ async function handleInteraction(interaction) {
       });
       return;
     }
-    if (current && current !== AFK_LOOKUP_TIMEOUT) void removeGameAfkSession(interaction.user.id);
+    if (current && current !== AFK_LOOKUP_TIMEOUT) void removeGameAfkSession(interaction.guildId, interaction.user.id);
     await interaction.showModal(buildGameAfkModal());
     return;
   }
 
   if (interaction.isButton() && interaction.customId === "game_afk:return") {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const session = await removeGameAfkSession(interaction.user.id);
+    const session = await removeGameAfkSession(interaction.guildId, interaction.user.id);
     if (!session) {
       await interaction.editReply({ content: noticeMessage("Вы сейчас не находитесь в AFK.") });
       return;
     }
-    const activeSessions = await getActiveGameAfkSessions();
+    const activeSessions = await getActiveGameAfkSessions(interaction.guildId);
     await interaction.editReply(buildGameAfkPanel(activeSessions));
     await sendLog(interaction.guild, new EmbedBuilder()
       .setColor(0x27ae60)
@@ -2332,7 +2327,7 @@ async function handleInteraction(interaction) {
       });
       return;
     }
-    const current = await getGameAfkSession(interaction.user.id);
+    const current = await getGameAfkSession(interaction.guildId, interaction.user.id);
     if (current && Date.parse(current.expiresAt) > Date.now()) {
       await interaction.editReply({
         content: noticeMessage(`Вы уже находитесь в AFK и вернётесь ${gameAfkTimestamp(current.expiresAt)}.`)
@@ -2342,12 +2337,13 @@ async function handleInteraction(interaction) {
     const startedAt = new Date();
     const expiresAt = new Date(startedAt.getTime() + hours * 60 * 60 * 1000);
     await saveGameAfkSession({
+      guildId: interaction.guildId,
       userId: interaction.user.id,
       reason,
       startedAt,
       expiresAt
     });
-    const activeSessions = await getActiveGameAfkSessions();
+    const activeSessions = await getActiveGameAfkSessions(interaction.guildId);
     await interaction.editReply(buildGameAfkPanel(activeSessions));
     await sendLog(interaction.guild, new EmbedBuilder()
       .setColor(0x2f80ed)
@@ -2539,7 +2535,7 @@ async function handleInteraction(interaction) {
     if (previousPanel && previousPanel !== interaction) {
       await previousPanel.deleteReply().catch(() => null);
     }
-    const sessions = await getActiveGameAfkSessions();
+    const sessions = await getActiveGameAfkSessions(interaction.guildId);
     if (activeAfkPanels.get(interaction.user.id) !== interaction) {
       await interaction.deleteReply().catch(() => null);
       return;

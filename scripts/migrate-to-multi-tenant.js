@@ -278,6 +278,29 @@ async function main() {
     await client.query(`ALTER TABLE afk_sessions ADD COLUMN IF NOT EXISTS guild_id TEXT REFERENCES guilds(id) ON DELETE CASCADE;`);
     await client.query(`UPDATE afk_sessions SET guild_id = $1 WHERE guild_id IS NULL;`, [DISCORD_GUILD_ID]);
 
+    // Widen the primary key from just user_id to (guild_id, user_id) - the
+    // same Discord user can be AFK in two different guilds at once, which
+    // the old single-column PK couldn't represent at all (a second guild's
+    // insert would just clobber the first guild's row). Guarded on the
+    // actual constraint shape, not a version flag, so it only runs once.
+    const { rows: pkColumns } = await client.query(`
+      SELECT a.attname
+      FROM pg_index i
+      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+      WHERE i.indrelid = 'afk_sessions'::regclass AND i.indisprimary
+    `);
+    const isComposite = pkColumns.length === 2 && pkColumns.some((r) => r.attname === "guild_id");
+    if (!isComposite) {
+      await client.query(`ALTER TABLE afk_sessions ALTER COLUMN guild_id SET NOT NULL;`);
+      const { rows: pkConstraint } = await client.query(`
+        SELECT conname FROM pg_constraint WHERE conrelid = 'afk_sessions'::regclass AND contype = 'p'
+      `);
+      if (pkConstraint[0]) {
+        await client.query(`ALTER TABLE afk_sessions DROP CONSTRAINT ${pkConstraint[0].conname};`);
+      }
+      await client.query(`ALTER TABLE afk_sessions ADD PRIMARY KEY (guild_id, user_id);`);
+    }
+
     await client.query("COMMIT");
     console.log(`Migration complete. Existing rows backfilled to guild_id = ${DISCORD_GUILD_ID}.`);
   } catch (error) {

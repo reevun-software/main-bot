@@ -353,17 +353,124 @@ function updateGuildConfig(guildId, patch) {
   ).then(() => merged);
 }
 
+// Reads for the web dashboard's API - these bypass the in-memory `state`
+// cache (unlike most of this file) and query Postgres directly, since the
+// dashboard wants this guild's current data on every request rather than
+// whatever was loaded at last boot/reload.
+
+async function getGuildMembersForApi(guildId) {
+  const { rows } = await pool.query(
+    `SELECT gm.discord_id, u.username, gm.current_rank, gm.active_warnings, gm.total_warnings
+     FROM guild_members gm
+     LEFT JOIN users u ON u.discord_id = gm.discord_id
+     WHERE gm.guild_id = $1
+     ORDER BY gm.current_rank DESC NULLS LAST, u.username`,
+    [guildId]
+  );
+  return rows.map((row) => ({
+    discordId: row.discord_id,
+    username: row.username ?? row.discord_id,
+    rank: row.current_rank,
+    activeWarnings: row.active_warnings,
+    totalWarnings: row.total_warnings
+  }));
+}
+
+async function getAuditLogForGuild(guildId, limit = 50) {
+  const { rows } = await pool.query(
+    `SELECT id, log_type, user_id, old_rank, new_rank, administrator_id, reason, warn_action, warning_reason, created_at
+     FROM user_logs WHERE guild_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2`,
+    [guildId, limit]
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    logType: row.log_type,
+    userId: row.user_id,
+    oldRank: row.old_rank,
+    newRank: row.new_rank,
+    administratorId: row.administrator_id,
+    reason: row.reason,
+    warnAction: row.warn_action,
+    warningReason: row.warning_reason,
+    createdAt: isoDate(row.created_at)
+  }));
+}
+
+async function getAfkSessionsForApi(guildId) {
+  return getActiveGameAfkSessions(guildId);
+}
+
+async function getTicketsForGuild(guildId, category) {
+  const { rows } = await pool.query(
+    category
+      ? `SELECT * FROM tickets WHERE guild_id = $1 AND category = $2 ORDER BY created_at DESC`
+      : `SELECT * FROM tickets WHERE guild_id = $1 ORDER BY created_at DESC`,
+    category ? [guildId, category] : [guildId]
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    category: row.category,
+    ticketKey: row.ticket_key,
+    uid: row.uid,
+    userId: row.user_id,
+    status: row.status,
+    requestType: row.request_type,
+    icName: row.ic_name,
+    characterLevel: row.character_level,
+    characterStaticId: row.character_static_id,
+    captRole: row.capt_role,
+    oocAge: row.ooc_age,
+    details: row.details,
+    claimedBy: row.claimed_by,
+    decidedBy: row.decided_by,
+    decisionReason: row.decision_reason,
+    createdAt: isoDate(row.created_at),
+    updatedAt: isoDate(row.updated_at),
+    closedAt: isoDate(row.closed_at)
+  }));
+}
+
+async function getBansForGuild(guildId) {
+  const { rows } = await pool.query(
+    `SELECT id, discord_user_id, character_name, reason, issued_by, created_at
+     FROM bans WHERE guild_id = $1 ORDER BY created_at DESC`,
+    [guildId]
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    discordUserId: row.discord_user_id,
+    characterName: row.character_name,
+    reason: row.reason,
+    issuedBy: row.issued_by,
+    createdAt: isoDate(row.created_at)
+  }));
+}
+
+async function addBanForGuild(guildId, { discordUserId, characterName, reason, issuedBy }) {
+  const { rows } = await pool.query(
+    `INSERT INTO bans (guild_id, discord_user_id, character_name, reason, issued_by)
+     VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
+    [guildId, discordUserId || null, characterName || null, reason, issuedBy]
+  );
+  return { id: rows[0].id, createdAt: isoDate(rows[0].created_at) };
+}
+
+async function removeBanForGuild(guildId, banId) {
+  await pool.query(`DELETE FROM bans WHERE guild_id = $1 AND id = $2`, [guildId, banId]);
+}
+
 function getApplications() { return state.applications; }
 function getUserDb() { return state.users; }
 function getRankHistory() { return state.ranks; }
 function getSupportTickets() { return state.supportTickets; }
 
-async function getActiveGameAfkSessions() {
+async function getActiveGameAfkSessions(guildId) {
   const { rows } = await pool.query(
     `SELECT user_id, reason, started_at, expires_at
      FROM afk_sessions
-     WHERE expires_at > now()
-     ORDER BY expires_at, started_at`
+     WHERE guild_id = $1 AND expires_at > now()
+     ORDER BY expires_at, started_at`,
+    [guildId]
   );
   return rows.map((row) => ({
     userId: row.user_id,
@@ -373,11 +480,11 @@ async function getActiveGameAfkSessions() {
   }));
 }
 
-async function getGameAfkSession(userId) {
+async function getGameAfkSession(guildId, userId) {
   const { rows } = await pool.query(
     `SELECT user_id, reason, started_at, expires_at
-     FROM afk_sessions WHERE user_id = $1 LIMIT 1`,
-    [String(userId)]
+     FROM afk_sessions WHERE guild_id = $1 AND user_id = $2 LIMIT 1`,
+    [guildId, String(userId)]
   );
   const row = rows[0];
   return row ? {
@@ -388,33 +495,33 @@ async function getGameAfkSession(userId) {
   } : null;
 }
 
-async function saveGameAfkSession({ userId, reason, startedAt, expiresAt }) {
+async function saveGameAfkSession({ guildId, userId, reason, startedAt, expiresAt }) {
   await pool.query(
-    `INSERT INTO afk_sessions (user_id, reason, started_at, expires_at, updated_at)
-     VALUES ($1, $2, $3, $4, now())
-     ON CONFLICT (user_id) DO UPDATE SET
+    `INSERT INTO afk_sessions (guild_id, user_id, reason, started_at, expires_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, now())
+     ON CONFLICT (guild_id, user_id) DO UPDATE SET
        reason = EXCLUDED.reason,
        started_at = EXCLUDED.started_at,
        expires_at = EXCLUDED.expires_at,
        updated_at = now()`,
-    [String(userId), reason, pgTimestamp(startedAt), pgTimestamp(expiresAt)]
+    [guildId, String(userId), reason, pgTimestamp(startedAt), pgTimestamp(expiresAt)]
   );
 }
 
-async function removeGameAfkSession(userId) {
+async function removeGameAfkSession(guildId, userId) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     const { rows } = await client.query(
       `SELECT user_id, reason, started_at, expires_at
-       FROM afk_sessions WHERE user_id = $1 FOR UPDATE`,
-      [String(userId)]
+       FROM afk_sessions WHERE guild_id = $1 AND user_id = $2 FOR UPDATE`,
+      [guildId, String(userId)]
     );
     if (!rows.length) {
       await client.query("COMMIT");
       return null;
     }
-    await client.query("DELETE FROM afk_sessions WHERE user_id = $1", [String(userId)]);
+    await client.query("DELETE FROM afk_sessions WHERE guild_id = $1 AND user_id = $2", [guildId, String(userId)]);
     await client.query("COMMIT");
     const row = rows[0];
     return {
@@ -431,19 +538,20 @@ async function removeGameAfkSession(userId) {
   }
 }
 
-async function takeExpiredGameAfkSessions() {
+async function takeExpiredGameAfkSessions(guildId) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     const { rows } = await client.query(
       `SELECT user_id, reason, started_at, expires_at
        FROM afk_sessions
-       WHERE expires_at <= now()
+       WHERE guild_id = $1 AND expires_at <= now()
        ORDER BY expires_at
-       FOR UPDATE`
+       FOR UPDATE`,
+      [guildId]
     );
     if (rows.length) {
-      await client.query("DELETE FROM afk_sessions WHERE expires_at <= now()");
+      await client.query("DELETE FROM afk_sessions WHERE guild_id = $1 AND expires_at <= now()", [guildId]);
     }
     await client.query("COMMIT");
     return rows.map((row) => ({
@@ -698,20 +806,27 @@ async function closeStorage() {
 }
 
 module.exports = {
+  addBanForGuild,
   closeStorage,
   deleteUserProfile,
   flushStorage,
   getActiveGameAfkSessions,
+  getAfkSessionsForApi,
   getApplications,
+  getAuditLogForGuild,
+  getBansForGuild,
   getBotInfo,
   getGameAfkSession,
   getGuildConfig,
+  getGuildMembersForApi,
   getRankHistory,
   getSupportTickets,
+  getTicketsForGuild,
   getUserDb,
   getWarnings,
   initStorage,
   reloadStorage,
+  removeBanForGuild,
   removeGameAfkSession,
   saveApplications,
   saveBotInfo,
