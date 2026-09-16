@@ -303,6 +303,56 @@ function upsertGuild({ id, name, icon = null, ownerDiscordId = null }) {
   );
 }
 
+// Column-name map so the API layer can accept camelCase field names
+// (matching the web dashboard's own naming) without duplicating this
+// mapping there too.
+const GUILD_CONFIG_COLUMNS = {
+  leadershipRoleIds: "leadership_role_ids",
+  rankRoleIds: "rank_role_ids",
+  warnRoleIds: "warn_role_ids",
+  verifiedMemberRoleId: "verified_member_role_id",
+  logChannelId: "log_channel_id",
+  applicationsChannelId: "applications_channel_id",
+  applicationPanelChannelId: "application_panel_channel_id",
+  supportPanelChannelId: "support_panel_channel_id",
+  adminPanelChannelId: "admin_panel_channel_id"
+};
+
+// Partial update - only the keys present in `patch` are touched, so the
+// dashboard can save one field (e.g. just the log channel) without
+// clobbering everything else. Returns the merged config immediately
+// (before the write is queued) so the caller/API response reflects it
+// right away instead of waiting on the DB round trip.
+function updateGuildConfig(guildId, patch) {
+  const current = getGuildConfig(guildId);
+  const merged = { ...current, ...patch };
+  state.guildConfigs[guildId] = merged;
+
+  const setClauses = [];
+  const params = [guildId];
+  for (const [jsKey, column] of Object.entries(GUILD_CONFIG_COLUMNS)) {
+    if (!(jsKey in patch)) continue;
+    params.push(
+      ["rankRoleIds", "warnRoleIds"].includes(jsKey) ? JSON.stringify(patch[jsKey]) : patch[jsKey]
+    );
+    setClauses.push(`${column} = $${params.length}`);
+  }
+  if (!setClauses.length) return Promise.resolve(merged);
+
+  return queueWrite("update guild config", () =>
+    pool.query(
+      `INSERT INTO guild_config (guild_id) VALUES ($1)
+       ON CONFLICT (guild_id) DO NOTHING`,
+      [guildId]
+    ).then(() =>
+      pool.query(
+        `UPDATE guild_config SET ${setClauses.join(", ")}, updated_at = now() WHERE guild_id = $1`,
+        params
+      )
+    )
+  ).then(() => merged);
+}
+
 function getApplications() { return state.applications; }
 function getUserDb() { return state.users; }
 function getRankHistory() { return state.ranks; }
@@ -672,5 +722,6 @@ module.exports = {
   saveWarnings,
   syncUserProfile,
   takeExpiredGameAfkSessions,
+  updateGuildConfig,
   upsertGuild
 };
