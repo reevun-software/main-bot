@@ -537,7 +537,7 @@ function profileHistoryEntries(targetId, type) {
   }));
 }
 
-function buildProfileHistory(type, targetId, ownerId, requestedPage) {
+function buildProfileHistory(guildId, type, targetId, ownerId, requestedPage) {
   const titles = { warn: "История варнов", rank: "История рангов" };
   const entries = profileHistoryEntries(targetId, type).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   const pages = Math.max(1, Math.ceil(entries.length / 10));
@@ -548,7 +548,7 @@ function buildProfileHistory(type, targetId, ownerId, requestedPage) {
     return `**${page * 10 + index + 1}. ${date}**\n${entry.text}`;
   });
   const embed = new EmbedBuilder()
-    .setColor(0x000000)
+    .setColor(systemColor(guildId))
     .setTitle(titles[type])
     .setDescription(lines.join("\n\n") || "История пока пуста.")
     .setFooter({ text: `Страница ${page + 1}/${pages} • Записей: ${entries.length}` });
@@ -702,6 +702,15 @@ function validateTicketTransferMember(member, ticket, scope) {
   }
   if (member.id === ticket.claimedBy) return "Эта заявка уже закреплена за указанным администратором.";
   return null;
+}
+
+// Accent color for the bot's "system" (neutral, non-status) embeds and
+// containers - configurable per guild via the dashboard. Never used for
+// status colors (success/error/warning/info), those stay fixed.
+function systemColor(guildId) {
+  const hex = getGuildConfig(guildId).systemMessageColor;
+  const parsed = hex ? parseInt(String(hex).replace(/^#/, ""), 16) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0x000000;
 }
 
 function rankDisplayName(guildId, rank) {
@@ -883,7 +892,7 @@ async function issueWarn(member, { reason, issuedBy }) {
   const count = warnings[member.id].active.length;
   if (count < 3) await syncWarnRoles(member, count);
   await dmUser(member, {
-    embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Получен варн").addFields(
+    embeds: [new EmbedBuilder().setColor(systemColor(member.guild.id)).setTitle("Получен варн").addFields(
       { name: "Причина", value: reason },
       { name: "Всего варнов", value: `${count}/3` },
       { name: "Администратор", value: issuedBy === "system" ? "Автомодерация" : `<@${issuedBy}>` }
@@ -1104,7 +1113,7 @@ function buildApplicationMessagePayload(application, user = null) {
       `**Почему хочет вступить:** ${value(application.reason)}\n` +
       `**Ссылка на скриншот со списком персонажей:** ${value(application.charactersLink)}`;
   const container = new ContainerBuilder()
-    .setAccentColor(0x000000)
+    .setAccentColor(systemColor(application.guildId))
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
         `## ${applicationTitle(application)}\n` +
@@ -1143,7 +1152,7 @@ function buildApplicationMessagePayload(application, user = null) {
 
 function buildApplicationDmEmbed(application, title, description, color, fields = []) {
   return new EmbedBuilder()
-    .setColor(0x000000)
+    .setColor(color)
     .setTitle(title)
     .setDescription(description)
     .addFields(fields)
@@ -1226,7 +1235,7 @@ async function buildApplicationPanel(guildId) {
   }
 
   const container = new ContainerBuilder()
-    .setAccentColor(0x000000)
+    .setAccentColor(systemColor(guildId))
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
         "## Оформление заявки в Destroy\n" +
@@ -1273,9 +1282,9 @@ function supportRequestTypeLabel(type) {
   return SUPPORT_REQUEST_TYPES[type] ?? "Неизвестный тип";
 }
 
-function buildSupportPanel() {
+function buildSupportPanel(guildId) {
   const embed = new EmbedBuilder()
-    .setColor(0x000000)
+    .setColor(systemColor(guildId))
     .setTitle("Личный кабинет")
     .setDescription(
       "Единый раздел для личных функций участника семьи. Здесь можно посмотреть текущий ранг, варны и историю профиля, создать обращение к администрации или открыть AFK-систему.\n\n" +
@@ -1303,9 +1312,9 @@ function buildSupportPanel() {
   return { embeds: [embed], components: [row] };
 }
 
-function buildAdminPanel() {
+function buildAdminPanel(guildId) {
   const embed = new EmbedBuilder()
-    .setColor(0x000000)
+    .setColor(systemColor(guildId))
     .setTitle("Административная панель")
     .setDescription(
       "Единый рабочий интерфейс руководства семьи. Выберите нужный раздел и действие — бот откроет форму и покажет результат только вам. Массовые действия поддерживают до 10 Discord ID или упоминаний за один раз.\n\n" +
@@ -1323,8 +1332,8 @@ function buildAdminPanel() {
   return { embeds: [embed], components: [firstRow] };
 }
 
-function buildAdminSection(section) {
-  const embed = new EmbedBuilder().setColor(0x000000);
+function buildAdminSection(guildId, section) {
+  const embed = new EmbedBuilder().setColor(systemColor(guildId));
   if (section === "warn") {
     embed
       .setTitle("Система варнов")
@@ -1378,7 +1387,7 @@ async function buildAdminRecruitmentPayload(guildId) {
   const departments = await getDepartmentsForGuild(guildId);
   if (!departments.length) {
     return {
-      embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Управление составами").setDescription("В этой семье пока нет ни одного отдела - настройте их в панели управления на сайте, затем сюда вернитесь, чтобы открывать и закрывать набор.")],
+      embeds: [new EmbedBuilder().setColor(systemColor(guildId)).setTitle("Управление составами").setDescription("В этой семье пока нет ни одного отдела - настройте их в панели управления на сайте, затем сюда вернитесь, чтобы открывать и закрывать набор.")],
       components: [],
       flags: MessageFlags.Ephemeral
     };
@@ -1394,7 +1403,7 @@ async function buildAdminRecruitmentPayload(guildId) {
       }))
     );
   return {
-    embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Управление составами").setDescription("Выберите состав. После выбора бот покажет текущее действие и запросит подтверждение.")],
+    embeds: [new EmbedBuilder().setColor(systemColor(guildId)).setTitle("Управление составами").setDescription("Выберите состав. После выбора бот покажет текущее действие и запросит подтверждение.")],
     components: [new ActionRowBuilder().addComponents(select)],
     flags: MessageFlags.Ephemeral
   };
@@ -1424,7 +1433,7 @@ async function getGameAfkSessionQuick(guildId, userId, timeoutMs = 750) {
   }
 }
 
-function buildGameAfkPanel(sessions = []) {
+function buildGameAfkPanel(guildId, sessions = []) {
   const activeList = sessions.length
     ? sessions.map((session) =>
       `• <@${session.userId}> — вернётся ${gameAfkTimestamp(session.expiresAt)} (${gameAfkTimestamp(session.expiresAt, "t")})`
@@ -1432,7 +1441,7 @@ function buildGameAfkPanel(sessions = []) {
     : "Никто сейчас не в AFK.";
 
   const embed = new EmbedBuilder()
-    .setColor(0x000000)
+    .setColor(systemColor(guildId))
     .setTitle("AFK-система")
     .setDescription(
       "Используйте AFK-систему, если вы **остаётесь в игре**, но временно отходите от компьютера. Нажмите **«Уйти в AFK»**, укажите причину и время отсутствия. В панели будет видно только время возвращения, а причина сохранится в логах администрации.\n\n" +
@@ -1608,7 +1617,7 @@ function buildSupportTypeSelectPayload(nonce, member) {
         .map(([value, label], index) => ({ label, value, emoji: SUPPORT_TYPE_OPTION_EMOJIS[index] }))
     );
   const container = new ContainerBuilder()
-    .setAccentColor(0x000000)
+    .setAccentColor(systemColor(member.guild.id))
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(`${applicationEmojiMention("create_ticket")} | Создать обращение`)
     )
@@ -1862,11 +1871,11 @@ async function refreshStaticPanel(guild, channelId, componentId, payloadBuilder)
       JSON.stringify(message.embeds).includes(componentId))
   );
   if (current) {
-    const updated = await current.edit(payloadBuilder()).catch(() => null);
+    const updated = await current.edit(payloadBuilder(guild.id)).catch(() => null);
     if (updated) return updated;
     await current.delete().catch(() => null);
   }
-  return channel.send(payloadBuilder());
+  return channel.send(payloadBuilder(guild.id));
 }
 
 async function processExpiredGameAfkSessions(guild) {
@@ -1878,7 +1887,7 @@ async function processExpiredGameAfkSessions(guild) {
     if (user) {
       await user.send({
         embeds: [new EmbedBuilder()
-          .setColor(0x000000)
+          .setColor(systemColor(guild.id))
           .setTitle("Время AFK завершилось")
           .setDescription("Указанное вами время AFK истекло. Вы автоматически удалены из списка AFK.")],
         allowedMentions: { parse: [], users: [], roles: [] }
@@ -1907,7 +1916,7 @@ function buildSupportTicketMessagePayload(ticket, user) {
     ? ` | ${getGuildConfig(ticket.guildId).leadershipRoleIds.map((roleId) => `<@&${roleId}>`).join(" ")}`
     : "";
   const container = new ContainerBuilder()
-    .setAccentColor(0x000000)
+    .setAccentColor(systemColor(ticket.guildId))
     .addTextDisplayComponents(
       new TextDisplayBuilder().setContent(
         `## ${supportTicketTitle(ticket)}\n` +
@@ -1960,7 +1969,7 @@ async function finalizeSupportTicketClose(interaction, ticketKey, ticket, ticket
   await dmUserEmbed(
     user,
     new EmbedBuilder()
-      .setColor(0x000000)
+      .setColor(systemColor(interaction.guildId))
       .setTitle(`Обращение ${ticket.uid} закрыто`)
       .setDescription(
         `Ваше обращение закрыл <@${interaction.user.id}>.` +
@@ -1970,7 +1979,7 @@ async function finalizeSupportTicketClose(interaction, ticketKey, ticket, ticket
   await sendLog(
     interaction.guild,
     new EmbedBuilder()
-      .setColor(0x000000)
+      .setColor(systemColor(interaction.guildId))
       .setTitle(`Обращение закрыто | ${ticket.uid}`)
       .setDescription(
         `<@${interaction.user.id}> закрыл обращение <@${ticket.userId}>.\nВетка: ${interaction.channel}` +
@@ -2049,7 +2058,7 @@ async function createGeneralSupportTicket(interaction, requestType, details) {
   await sendLog(
     interaction.guild,
     new EmbedBuilder()
-      .setColor(0x000000)
+      .setColor(systemColor(interaction.guildId))
       .setTitle(`Новое обращение | ${uid}`)
       .setDescription(
         `<@${interaction.user.id}> создал обращение.\n` +
@@ -2178,7 +2187,7 @@ async function sendLog(guild, embed) {
 
 function memberEmbed(user, rank, warnCount, member = null) {
   const embed = new EmbedBuilder()
-    .setColor(0x000000)
+    .setColor(systemColor(member?.guild?.id))
     .setTitle(`Профиль: ${user.username}`)
     .setThumbnail(user.displayAvatarURL())
     .addFields(
@@ -2390,14 +2399,14 @@ async function claimTicketFromActivity(channel, reviewer) {
   await sendLog(
     channel.guild,
     new EmbedBuilder()
-      .setColor(0x000000)
+      .setColor(systemColor(channel.guild.id))
       .setTitle(`Обращение взято в работу | ${ticket.uid}`)
       .setDescription(`<@${reviewer.id}> взял обращение <@${ticket.userId}>.`)
   );
   await dmUserEmbed(
     user,
     new EmbedBuilder()
-      .setColor(0x000000)
+      .setColor(systemColor(channel.guild.id))
       .setTitle(`Обращение ${ticket.uid} взято в работу`)
       .setDescription(`Администратор <@${reviewer.id}> приступил к рассмотрению вашего обращения.\n\nОткрыть обращение: ${channel}`)
   );
@@ -2670,7 +2679,7 @@ async function handleInteraction(interaction) {
       return;
     }
     const activeSessions = await getActiveGameAfkSessions(interaction.guildId);
-    await interaction.editReply(buildGameAfkPanel(activeSessions));
+    await interaction.editReply(buildGameAfkPanel(interaction.guildId, activeSessions));
     await sendLog(interaction.guild, new EmbedBuilder()
       .setColor(0x27ae60)
       .setTitle("Пользователь вернулся из AFK")
@@ -2710,7 +2719,7 @@ async function handleInteraction(interaction) {
       expiresAt
     });
     const activeSessions = await getActiveGameAfkSessions(interaction.guildId);
-    await interaction.editReply(buildGameAfkPanel(activeSessions));
+    await interaction.editReply(buildGameAfkPanel(interaction.guildId, activeSessions));
     await sendLog(interaction.guild, new EmbedBuilder()
       .setColor(0x2f80ed)
       .setTitle("Пользователь ушёл в AFK")
@@ -2848,7 +2857,7 @@ async function handleInteraction(interaction) {
           return;
         }
         await dmUserEmbed(target.user, new EmbedBuilder()
-          .setColor(0x000000)
+          .setColor(systemColor(interaction.guildId))
           .setTitle("Вы замьючены")
           .addFields(
             { name: "Причина", value: reason },
@@ -2871,7 +2880,7 @@ async function handleInteraction(interaction) {
         return;
       }
       await dmUserEmbed(target.user, new EmbedBuilder()
-        .setColor(0x000000)
+        .setColor(systemColor(interaction.guildId))
         .setTitle("С вас снят мьют")
         .addFields({ name: "Причина", value: reason }, { name: "Администратор", value: `<@${interaction.user.id}>` }));
       await sendLog(interaction.guild, new EmbedBuilder()
@@ -2895,7 +2904,7 @@ async function handleInteraction(interaction) {
 
     if (["warn", "rank"].includes(action)) {
       const page = Number.parseInt(rawPage, 10);
-      await interaction.editReply(buildProfileHistory(action, targetId, ownerId, Number.isFinite(page) ? page : 0));
+      await interaction.editReply(buildProfileHistory(interaction.guildId, action, targetId, ownerId, Number.isFinite(page) ? page : 0));
       return;
     }
 
@@ -2973,7 +2982,7 @@ async function handleInteraction(interaction) {
       await interaction.deleteReply().catch(() => null);
       return;
     }
-    await interaction.editReply(buildGameAfkPanel(sessions));
+    await interaction.editReply(buildGameAfkPanel(interaction.guildId, sessions));
     return;
   }
 
@@ -2996,7 +3005,7 @@ async function handleInteraction(interaction) {
       await interaction.reply({ content: errorMessage("Раздел административной панели не найден."), flags: MessageFlags.Ephemeral });
       return;
     }
-    const panel = buildAdminSection(section);
+    const panel = buildAdminSection(interaction.guildId, section);
     await interaction.reply({ embeds: [panel.embed], components: [panel.row], flags: MessageFlags.Ephemeral });
     return;
   }
@@ -3060,7 +3069,7 @@ async function handleInteraction(interaction) {
       return;
     }
     if (action === "history") {
-      await interaction.editReply(buildProfileHistory(system, target.id, interaction.user.id, 0));
+      await interaction.editReply(buildProfileHistory(interaction.guildId, system, target.id, interaction.user.id, 0));
       return;
     }
 
@@ -3085,7 +3094,7 @@ async function handleInteraction(interaction) {
           await syncMemberRankRole(member, newRank);
           const syncedNickname = await syncMemberRankNickname(member, newRank);
           await addUserAudit(member.id, "rank", { oldRank, newRank, adminId: interaction.user.id, reason });
-          await dmUser(member, { embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Ваш ранг изменён").setDescription(`**${rankDisplayName(interaction.guildId, oldRank)} → ${rankDisplayName(interaction.guildId, newRank)}**`).addFields({ name: "Причина", value: reason }, { name: "Администратор", value: `<@${interaction.user.id}>` })] });
+          await dmUser(member, { embeds: [new EmbedBuilder().setColor(systemColor(interaction.guildId)).setTitle("Ваш ранг изменён").setDescription(`**${rankDisplayName(interaction.guildId, oldRank)} → ${rankDisplayName(interaction.guildId, newRank)}**`).addFields({ name: "Причина", value: reason }, { name: "Администратор", value: `<@${interaction.user.id}>` })] });
           completed.push(`<@${member.id}> — **${rankDisplayName(interaction.guildId, oldRank)} → ${rankDisplayName(interaction.guildId, newRank)}**${syncedNickname ? `, никнейм: **${syncedNickname}**` : ", никнейм не изменён: IC-имя или Static ID не найдены"}`);
           logLines.push(`<@${member.id}> — **${oldRank} → ${newRank}**`);
         } catch (error) {
@@ -3846,7 +3855,7 @@ async function handleInteraction(interaction) {
     await sendLog(
       interaction.guild,
     new EmbedBuilder()
-      .setColor(0x000000)
+      .setColor(systemColor(interaction.guildId))
         .setTitle(`${isApplication ? "Заявка передана" : "Обращение передано"} | ${ticket.uid}`)
         .setDescription(`<@${interaction.user.id}> передал ${isApplication ? "заявку" : "обращение"}.`)
         .addFields(
@@ -3858,7 +3867,7 @@ async function handleInteraction(interaction) {
     await dmUserEmbed(
       applicant,
       new EmbedBuilder()
-        .setColor(0x000000)
+        .setColor(systemColor(interaction.guildId))
         .setTitle(`${entityName} ${ticket.uid} ${transferVerb}`)
         .setDescription(
           `${isApplication ? "Ваша заявка передана администратору" : "Ваше обращение передано администратору"} <@${targetMember.id}>.\n\n${isApplication ? "Открыть заявку" : "Открыть обращение"}: ${interaction.channel}`

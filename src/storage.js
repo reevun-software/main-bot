@@ -179,7 +179,8 @@ async function loadState() {
       restorableRoleIds: row.restorable_role_ids ?? [],
       exemptRoleIds: row.exempt_role_ids ?? [],
       enableSlashCommands: row.enable_slash_commands,
-      enableTextCommands: row.enable_text_commands
+      enableTextCommands: row.enable_text_commands,
+      systemMessageColor: row.system_message_color
     };
   }
 
@@ -333,7 +334,8 @@ const EMPTY_GUILD_CONFIG = {
   restorableRoleIds: [],
   exemptRoleIds: [],
   enableSlashCommands: true,
-  enableTextCommands: true
+  enableTextCommands: true,
+  systemMessageColor: "#79040C"
 };
 // A guild with no row yet (bot just joined, dashboard not configured) gets
 // an empty-but-shaped config rather than undefined, so callers can always
@@ -417,7 +419,8 @@ const GUILD_CONFIG_COLUMNS = {
   restorableRoleIds: "restorable_role_ids",
   exemptRoleIds: "exempt_role_ids",
   enableSlashCommands: "enable_slash_commands",
-  enableTextCommands: "enable_text_commands"
+  enableTextCommands: "enable_text_commands",
+  systemMessageColor: "system_message_color"
 };
 
 const SECURITY_SETTINGS_COLUMNS = {

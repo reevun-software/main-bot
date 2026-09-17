@@ -188,6 +188,7 @@ async function main() {
     await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS exempt_role_ids TEXT[] NOT NULL DEFAULT '{}';`);
     await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS enable_slash_commands BOOLEAN NOT NULL DEFAULT TRUE;`);
     await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS enable_text_commands BOOLEAN NOT NULL DEFAULT TRUE;`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS system_message_color TEXT NOT NULL DEFAULT '#79040C';`);
 
     // rank_role_ids is {"<rank>": {roleIds: [...], label, nicknamePrefix}} -
     // an arbitrary-length, self-describing structure (any rank count, any

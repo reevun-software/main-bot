@@ -178,6 +178,10 @@ CREATE TABLE IF NOT EXISTS guild_config (
   exempt_role_ids               TEXT[] NOT NULL DEFAULT '{}',
   enable_slash_commands         BOOLEAN NOT NULL DEFAULT TRUE,
   enable_text_commands          BOOLEAN NOT NULL DEFAULT TRUE,
+  -- Accent color for the bot's own "system" embeds/containers (applications,
+  -- panels, notices) - hex string like '#79040C'. Not the status colors
+  -- (success/error/warning), those stay fixed.
+  system_message_color          TEXT NOT NULL DEFAULT '#79040C',
   updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

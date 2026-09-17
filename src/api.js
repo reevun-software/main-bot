@@ -48,7 +48,8 @@ const PATCHABLE_CONFIG_FIELDS = new Set([
   "restorableRoleIds",
   "exemptRoleIds",
   "enableSlashCommands",
-  "enableTextCommands"
+  "enableTextCommands",
+  "systemMessageColor"
 ]);
 
 const PATCHABLE_SECURITY_FIELDS = new Set([
