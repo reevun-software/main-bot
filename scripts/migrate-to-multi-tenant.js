@@ -271,34 +271,13 @@ async function main() {
     await client.query(`ALTER TABLE recruitment_settings ADD COLUMN IF NOT EXISTS guild_id TEXT REFERENCES guilds(id) ON DELETE CASCADE;`);
     await client.query(`UPDATE recruitment_settings SET guild_id = $1 WHERE guild_id IS NULL;`, [DISCORD_GUILD_ID]);
 
-    // The application flow used to be hardcoded to two sections (Capt/RP)
-    // via recruitment_settings - it's department-driven now (any number of
-    // departments, any names). A guild with zero departments gets a single
-    // generic "apply to the family" button instead, which would silently
-    // replace this guild's real, currently-working Capt/RP recruitment the
-    // moment this deploys. Seed two departments from its legacy
-    // recruitment_settings rows (same open/closed state) so the live
-    // family's recruitment keeps working exactly as it does today under
-    // the new system - guarded on guild_departments already being empty,
-    // so this never runs again or touches departments a family has since
-    // configured themselves.
-    const { rows: existingDepartmentCount } = await client.query(
-      `SELECT count(*)::int AS n FROM guild_departments WHERE guild_id = $1`,
-      [DISCORD_GUILD_ID]
-    );
-    if (existingDepartmentCount[0].n === 0) {
-      const { rows: legacyRecruitment } = await client.query(
-        `SELECT section, recruitment_open FROM recruitment_settings WHERE guild_id = $1`,
-        [DISCORD_GUILD_ID]
-      );
-      for (const row of legacyRecruitment) {
-        const name = String(row.section).toLowerCase() === "capt" ? "Капт-состав" : "RP-состав";
-        await client.query(
-          `INSERT INTO guild_departments (guild_id, name, recruitment_open) VALUES ($1, $2, $3)`,
-          [DISCORD_GUILD_ID, name, row.recruitment_open]
-        );
-      }
-    }
+    // One-time seed (Capt/RP -> department-driven system) already ran in
+    // production - guild_departments has real, user-managed rows now.
+    // This used to re-seed from recruitment_settings whenever
+    // guild_departments was empty, but "empty" also means "the family
+    // deleted every department on purpose" - since this migration runs on
+    // every boot, that resurrected deleted departments on the next
+    // restart/deploy. Not needed again; removed.
 
     await client.query(`ALTER TABLE user_logs ADD COLUMN IF NOT EXISTS guild_id TEXT REFERENCES guilds(id) ON DELETE CASCADE;`);
     await client.query(`UPDATE user_logs SET guild_id = $1 WHERE guild_id IS NULL;`, [DISCORD_GUILD_ID]);
