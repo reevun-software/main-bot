@@ -4035,6 +4035,23 @@ async function handleInteraction(interaction) {
       });
       return;
     }
+
+    const bans = await getBansForGuild(interaction.guildId).catch(() => []);
+    const matchedBan = bans.find((ban) =>
+      ban.characterName && ban.characterName.trim().toLowerCase() === characterParts[0].toLowerCase()
+    );
+    if (matchedBan) {
+      await interaction.member.ban({
+        reason: `Пользователь находится в чёрном списке (совпадение: запись #${matchedBan.id})`
+      }).catch((error) => {
+        console.error(`[${interaction.guildId}] Не удалось забанить участника ${interaction.user.id} из чёрного списка (по имени персонажа):`, error);
+      });
+      await interaction.editReply({
+        content: errorMessage("Вступление в семью запрещено: указанный персонаж находится в чёрном списке.")
+      });
+      return;
+    }
+
     const customQuestions = Array.isArray(department?.questions) ? department.questions.slice(0, 4) : [];
     let oocAge = null;
     let reason = null;
