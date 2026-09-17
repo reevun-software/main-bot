@@ -6,7 +6,6 @@ const ROOT = path.join(__dirname, "..");
 
 const state = {
   applications: {},
-  botInfo: {},
   guildConfigs: {}, // guildId -> per-guild config (replaces the old single config.json)
   ranks: {},
   supportTickets: {},
@@ -135,7 +134,6 @@ async function initStorage() {
 
 function resetState() {
   state.applications = {};
-  state.botInfo = {};
   state.guildConfigs = {};
   state.ranks = {};
   state.supportTickets = {};
@@ -154,18 +152,6 @@ function reloadStorage() {
 }
 
 async function loadState() {
-  const { rows: recruitmentRows } = await pool.query(
-    "SELECT id, section, recruitment_open, updated_at FROM recruitment_settings ORDER BY id"
-  );
-  const captSettings = recruitmentRows.find((row) => row.id === 1 || String(row.section).toLowerCase() === "capt");
-  const rpSettings = recruitmentRows.find((row) => row.id === 2 || String(row.section).toLowerCase() === "rp");
-  state.botInfo = {
-    captRecruitmentOpen: Boolean(captSettings?.recruitment_open),
-    rpRecruitmentOpen: Boolean(rpSettings?.recruitment_open),
-    captUpdatedAt: isoDate(captSettings?.updated_at),
-    rpUpdatedAt: isoDate(rpSettings?.updated_at)
-  };
-
   const { rows: guildConfigRows } = await pool.query("SELECT * FROM guild_config");
   state.guildConfigs = {};
   for (const row of guildConfigRows) {
@@ -241,6 +227,7 @@ async function loadState() {
         charactersLink: row.characters_link,
         customAnswers: row.custom_answers?.length ? row.custom_answers : null,
         requestType: row.request_type,
+        departmentName: row.department_name,
         claimedBy: row.claimed_by,
         closedBy: row.decided_by,
         decisionReason: row.decision_reason,
@@ -275,7 +262,6 @@ async function loadState() {
 }
 
 function getWarnings() { return state.warnings; }
-function getBotInfo() { return state.botInfo; }
 
 const EMPTY_GUILD_CONFIG = {
   leadershipRoleIds: [],
@@ -426,12 +412,15 @@ async function getTicketsForGuild(guildId, category) {
     userId: row.user_id,
     status: row.status,
     requestType: row.request_type,
+    departmentName: row.department_name,
     icName: row.ic_name,
     characterLevel: row.character_level,
     characterStaticId: row.character_static_id,
     captRole: row.capt_role,
     oocAge: row.ooc_age,
     details: row.details,
+    charactersLink: row.characters_link,
+    customAnswers: row.custom_answers?.length ? row.custom_answers : null,
     claimedBy: row.claimed_by,
     decidedBy: row.decided_by,
     decisionReason: row.decision_reason,
@@ -655,30 +644,6 @@ async function takeExpiredGameAfkSessions(guildId) {
   }
 }
 
-function saveBotInfo(info, section = "both") {
-  state.botInfo = info;
-  return queueWrite("recruitment settings", async () => {
-    const updates = [];
-    if (section === "capt" || section === "both") {
-      updates.push([1, "Capt", Boolean(info.captRecruitmentOpen)]);
-    }
-    if (section === "rp" || section === "both") {
-      updates.push([2, "RP", Boolean(info.rpRecruitmentOpen)]);
-    }
-    for (const [id, sectionName, open] of updates) {
-      await pool.query(
-        `INSERT INTO recruitment_settings (id, section, recruitment_open, updated_at)
-         VALUES ($1, $2, $3, now())
-         ON CONFLICT (id) DO UPDATE SET
-           section = EXCLUDED.section,
-           recruitment_open = EXCLUDED.recruitment_open,
-           updated_at = now()`,
-        [id, sectionName, open]
-      );
-    }
-  });
-}
-
 function saveUserDb(users) {
   state.users = users;
   return queueWrite("users", async () => {
@@ -837,14 +802,15 @@ function saveApplications(applications) {
         .map((part) => part.trim());
       await client.query(
          `INSERT INTO tickets
-         (category, guild_id, ticket_key, uid, user_id, status, request_type, ic_name, character_level,
-          character_static_id, capt_role, ooc_age, details, characters_link, custom_answers, claimed_by,
-          decided_by, decision_reason,
+         (category, guild_id, ticket_key, uid, user_id, status, request_type, department_name, ic_name,
+          character_level, character_static_id, capt_role, ooc_age, details, characters_link, custom_answers,
+          claimed_by, decided_by, decision_reason,
           channel_id, message_id, announcement_channel_id, announcement_message_id,
           created_at, updated_at, closed_at)
-         VALUES ('application', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
+         VALUES ('application', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)`,
         [application.guildId ?? null, applicationKey, application.uid ?? null, application.userId,
-          application.status ?? "new", application.requestType ?? "rp", characterParts[0] || null,
+          application.status ?? "new", application.requestType ?? "rp", application.departmentName ?? null,
+          characterParts[0] || null,
           characterParts[1] || null, characterParts[2] || null, application.captRole ?? null,
           application.oocAge ?? null,
           application.reason ?? null,
@@ -908,7 +874,6 @@ module.exports = {
   getApplications,
   getAuditLogForGuild,
   getBansForGuild,
-  getBotInfo,
   getDepartmentById,
   getDepartmentsForGuild,
   getGameAfkSession,
@@ -924,7 +889,6 @@ module.exports = {
   removeBanForGuild,
   removeGameAfkSession,
   saveApplications,
-  saveBotInfo,
   saveGameAfkSession,
   saveRankHistory,
   saveSupportTickets,

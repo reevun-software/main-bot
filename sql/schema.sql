@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   user_id                   TEXT NOT NULL,
   status                    TEXT NOT NULL DEFAULT 'new',
   request_type              TEXT,
+  department_name           TEXT,
   ic_name                   TEXT,
   character_level           TEXT,
   character_static_id       TEXT,

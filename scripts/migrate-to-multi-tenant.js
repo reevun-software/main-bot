@@ -315,6 +315,10 @@ async function main() {
     // alongside custom_answers since both need the same treatment.
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS characters_link TEXT;`);
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS custom_answers JSONB NOT NULL DEFAULT '[]'::jsonb;`);
+    // department_name was never persisted either - held only in the
+    // in-memory applications map, so every application's shown department
+    // reverted to the generic "Общая заявка" fallback after a restart.
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS department_name TEXT;`);
 
     await client.query(`ALTER TABLE afk_sessions ADD COLUMN IF NOT EXISTS guild_id TEXT REFERENCES guilds(id) ON DELETE CASCADE;`);
     await client.query(`UPDATE afk_sessions SET guild_id = $1 WHERE guild_id IS NULL;`, [DISCORD_GUILD_ID]);

@@ -830,7 +830,10 @@ async function applyThirdWarnPunishment(member, auditReason) {
   } else if (warnPunishmentMode === "ban") {
     await member.ban({ reason: auditReason });
   } else if (warnPunishmentMode === "assignRole" && warnPunishmentRoleId) {
-    await member.roles.set([warnPunishmentRoleId], auditReason);
+    // Just adds the role - this mode was specced as "assign a role without
+    // touching the member's other roles/access" (unlike stripRoles, which
+    // deliberately wipes everything), so .set([...]) here would be wrong.
+    await member.roles.add(warnPunishmentRoleId, auditReason);
   } else {
     await member.roles.set([], auditReason);
   }
@@ -1530,7 +1533,17 @@ async function keepOnlyTicketParticipants(thread, userIds) {
 }
 
 async function ensureTicketReviewerParentAccess(parent, reviewerRoleIds) {
-  await Promise.all(reviewerRoleIds.map(async (roleId) => {
+  // A role id here can go stale (role deleted/renamed on Discord since it
+  // was configured) - resolving against the guild's live role cache first
+  // means one bad id just gets skipped instead of throwing "Supplied
+  // parameter is not a User nor a Role" and failing every other role in
+  // the same Promise.all along with it.
+  const validRoleIds = reviewerRoleIds.filter((roleId) => parent.guild.roles.cache.has(roleId));
+  const staleRoleIds = reviewerRoleIds.filter((roleId) => !validRoleIds.includes(roleId));
+  if (staleRoleIds.length) {
+    console.error(`[${parent.guild.id}] Пропущены несуществующие роли руководства: ${staleRoleIds.join(", ")}`);
+  }
+  await Promise.all(validRoleIds.map(async (roleId) => {
     const permissions = parent.permissionsFor(roleId);
     if (
       permissions?.has(PermissionFlagsBits.ViewChannel) &&
