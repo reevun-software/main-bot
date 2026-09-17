@@ -49,6 +49,7 @@ const {
   getUserDb,
   getWarnings,
   initStorage,
+  pruneStaleDepartedMemberSnapshots,
   reloadStorage,
   removeGameAfkSession,
   saveApplications,
@@ -336,6 +337,11 @@ const SUPPORT_TYPE_FIELDS = {
 };
 const GAME_AFK_SWEEP_INTERVAL_MS = 30 * 1000;
 const STORAGE_RELOAD_INTERVAL_MS = 60 * 1000;
+// A departed-member snapshot only gets cleared by a rejoin - long enough to
+// cover a real "took a break" return, short enough not to grow forever for
+// members who never come back.
+const DEPARTED_MEMBER_SNAPSHOT_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+const DEPARTED_MEMBER_SNAPSHOT_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const GAME_AFK_MAX_HOURS = 4;
 const botRankChanges = new Map();
 
@@ -922,7 +928,15 @@ async function removeMute(member, reason) {
   if ((muteMode === "role" || muteMode === "both") && muteRoleId && member.roles.cache.has(muteRoleId)) {
     await member.roles.remove(muteRoleId, reason);
   }
-  if (member.communicationDisabledUntil && member.communicationDisabledUntil.getTime() > Date.now()) {
+  // Gated the same way applyMute applies it - in "role" mode this bot never
+  // sets a timeout, so /unmute shouldn't clear one either (it could belong
+  // to an unrelated native Discord timeout a mod or Discord's own AutoMod
+  // applied directly, which this command has no business touching).
+  if (
+    (muteMode === "timeout" || muteMode === "both") &&
+    member.communicationDisabledUntil &&
+    member.communicationDisabledUntil.getTime() > Date.now()
+  ) {
     await member.timeout(null, reason);
   }
 }
@@ -976,6 +990,11 @@ function mentionSpamViolation(message) {
   return uniqueMentions.size > 5;
 }
 
+// config.ignoreSlashCommands has nothing to hook into: automod only ever
+// scans real chat messages (Events.MessageCreate), and this bot has no
+// text-command handling and no path where a slash command's own argument
+// text reaches this scanner - so the field is accepted/stored (dashboard
+// UI captures it) but currently a no-op, same as ignoreCommandCooldownForMods.
 function inAutomodScope(member, channelId, config) {
   if (config.ignoreAdminsAndMods && isModerator(member)) return false;
   if (config.targetRoleIds.length && !config.targetRoleIds.some((id) => member.roles.cache.has(id))) return false;
@@ -2256,6 +2275,13 @@ async function handleClientReady(readyClient) {
     });
   }, STORAGE_RELOAD_INTERVAL_MS);
   storageReloadSweep.unref?.();
+
+  const departedMemberSweep = setInterval(() => {
+    pruneStaleDepartedMemberSnapshots(DEPARTED_MEMBER_SNAPSHOT_MAX_AGE_MS).catch((error) => {
+      console.error("Failed to prune stale departed-member snapshots:", error);
+    });
+  }, DEPARTED_MEMBER_SNAPSHOT_SWEEP_INTERVAL_MS);
+  departedMemberSweep.unref?.();
 }
 
 client.once(Events.ClientReady, (readyClient) => {

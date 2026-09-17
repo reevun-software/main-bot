@@ -535,6 +535,16 @@ async function clearDepartedMemberSnapshot(guildId, discordId) {
   await pool.query(`DELETE FROM guild_departed_members WHERE guild_id = $1 AND discord_id = $2`, [guildId, discordId]);
 }
 
+// A snapshot is only ever cleared by a rejoin (see clearDepartedMemberSnapshot
+// above) - a member who never comes back leaves a permanent row otherwise.
+// Called from a daily sweep in index.js.
+async function pruneStaleDepartedMemberSnapshots(maxAgeMs) {
+  await pool.query(
+    `DELETE FROM guild_departed_members WHERE left_at < now() - ($1::text || ' milliseconds')::interval`,
+    [maxAgeMs]
+  );
+}
+
 // Partial update - only the keys present in `patch` are touched, so the
 // dashboard can save one field (e.g. just the log channel) without
 // clobbering everything else. Returns the merged config immediately
@@ -1110,6 +1120,7 @@ module.exports = {
   getUserDb,
   getWarnings,
   initStorage,
+  pruneStaleDepartedMemberSnapshots,
   reloadStorage,
   removeBanForGuild,
   removeGameAfkSession,

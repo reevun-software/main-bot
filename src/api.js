@@ -80,6 +80,14 @@ const PATCHABLE_AUTOMOD_FIELDS = new Set([
   "ignoredChannelIds"
 ]);
 
+// These flow into === comparisons in the bot's own mute/automod logic - an
+// unrecognized value there doesn't crash, it just silently no-ops (e.g. a
+// mute_mode of "banana" mutes nobody), which is worse than rejecting it here
+// at the boundary between this API and whatever calls it.
+const MUTE_MODES = new Set(["role", "timeout", "both"]);
+const AUTOMOD_PUNISHMENTS = new Set(["none", "warn", "mute", "kick", "ban"]);
+const AUTOMOD_STRATEGIES = new Set(["blocklist", "allowlist"]);
+
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let raw = "";
@@ -218,7 +226,9 @@ async function handleSecurity(req, res, guildId) {
     }
     const patch = {};
     for (const key of Object.keys(body)) {
-      if (PATCHABLE_SECURITY_FIELDS.has(key)) patch[key] = body[key];
+      if (!PATCHABLE_SECURITY_FIELDS.has(key)) continue;
+      if (key === "muteMode" && !MUTE_MODES.has(body[key])) continue;
+      patch[key] = body[key];
     }
     if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No recognized fields in body" });
     return sendJson(res, 200, await updateSecuritySettings(guildId, patch));
@@ -238,7 +248,10 @@ async function handleAutomod(req, res, guildId, filterType) {
       }
       const patch = {};
       for (const key of Object.keys(body)) {
-        if (PATCHABLE_AUTOMOD_FIELDS.has(key)) patch[key] = body[key];
+        if (!PATCHABLE_AUTOMOD_FIELDS.has(key)) continue;
+        if (key === "punishment" && !AUTOMOD_PUNISHMENTS.has(body[key])) continue;
+        if (key === "strategy" && !AUTOMOD_STRATEGIES.has(body[key])) continue;
+        patch[key] = body[key];
       }
       if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No recognized fields in body" });
       return sendJson(res, 200, await updateAutomodFilterConfig(guildId, filterType, patch));
