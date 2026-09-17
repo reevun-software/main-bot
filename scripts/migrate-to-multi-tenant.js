@@ -109,33 +109,21 @@ async function main() {
       );
     `);
 
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS guild_bot_settings (
-        guild_id                     TEXT PRIMARY KEY REFERENCES guilds(id) ON DELETE CASCADE,
-        interface_language           TEXT NOT NULL DEFAULT 'ru',
-        system_message_color         TEXT NOT NULL DEFAULT '#79040C',
-        enable_slash_commands        BOOLEAN NOT NULL DEFAULT TRUE,
-        enable_text_commands         BOOLEAN NOT NULL DEFAULT TRUE,
-        trusted_admin_role_ids       TEXT[] NOT NULL DEFAULT '{}',
-        default_role_ids             TEXT[] NOT NULL DEFAULT '{}',
-        always_assign_default_roles  BOOLEAN NOT NULL DEFAULT FALSE,
-        restore_nickname_on_rejoin   BOOLEAN NOT NULL DEFAULT FALSE,
-        restore_old_roles_on_rejoin  BOOLEAN NOT NULL DEFAULT FALSE,
-        restorable_role_ids          TEXT[] NOT NULL DEFAULT '{}',
-        exempt_role_ids              TEXT[] NOT NULL DEFAULT '{}',
-        project                      TEXT,
-        server                       TEXT,
-        updated_at                   TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-    `);
+    // guild_bot_settings and guild_modules used to be created here too, but
+    // neither was ever read or written by any bot JS - they only mirrored
+    // the website's own tables of the same name (which own that data for
+    // real: interface_language/system_message_color/trusted_admin_role_ids/
+    // project/server, and the dashboard's own module-visibility toggles).
+    // Dropped as dead scaffolding; do not recreate them here.
 
     await client.query(`
-      CREATE TABLE IF NOT EXISTS guild_modules (
+      CREATE TABLE IF NOT EXISTS guild_departed_members (
         guild_id    TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
-        module_key  TEXT NOT NULL,
-        enabled     BOOLEAN NOT NULL DEFAULT TRUE,
-        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (guild_id, module_key)
+        discord_id  TEXT NOT NULL,
+        nickname    TEXT,
+        role_ids    TEXT[] NOT NULL DEFAULT '{}',
+        left_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (guild_id, discord_id)
       );
     `);
 
@@ -192,6 +180,14 @@ async function main() {
     await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS departments_enabled BOOLEAN NOT NULL DEFAULT TRUE;`);
     await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS warn_punishment_mode TEXT NOT NULL DEFAULT 'stripRoles';`);
     await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS warn_punishment_role_id TEXT;`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS default_role_ids TEXT[] NOT NULL DEFAULT '{}';`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS always_assign_default_roles BOOLEAN NOT NULL DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS restore_nickname_on_rejoin BOOLEAN NOT NULL DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS restore_old_roles_on_rejoin BOOLEAN NOT NULL DEFAULT FALSE;`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS restorable_role_ids TEXT[] NOT NULL DEFAULT '{}';`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS exempt_role_ids TEXT[] NOT NULL DEFAULT '{}';`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS enable_slash_commands BOOLEAN NOT NULL DEFAULT TRUE;`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS enable_text_commands BOOLEAN NOT NULL DEFAULT TRUE;`);
 
     // rank_role_ids is {"<rank>": {roleIds: [...], label, nicknamePrefix}} -
     // an arbitrary-length, self-describing structure (any rank count, any

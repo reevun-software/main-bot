@@ -31,16 +31,20 @@ const {
 const { globalCommands: slashCommandDefinitions } = require("./register-commands");
 const {
   addMemberToDepartment,
+  clearDepartedMemberSnapshot,
   closeStorage,
   deleteUserProfile,
   flushStorage,
   getActiveGameAfkSessions,
   getApplications,
+  getAutomodFilterConfig,
+  getDepartedMemberSnapshot,
   getDepartmentById,
   getDepartmentsForGuild,
   getGameAfkSession,
   getGuildConfig,
   getRankHistory,
+  getSecuritySettings,
   getSupportTickets,
   getUserDb,
   getWarnings,
@@ -48,6 +52,7 @@ const {
   reloadStorage,
   removeGameAfkSession,
   saveApplications,
+  saveDepartedMemberSnapshot,
   saveGameAfkSession,
   saveRankHistory,
   saveSupportTickets,
@@ -342,6 +347,20 @@ function isLeadership(member) {
 
 function isApplicationReviewer(member) {
   return Boolean(member?.permissions?.has(PermissionFlagsBits.Administrator)) || isLeadership(member);
+}
+
+// moderator_role_ids (dashboard: Security page) extends who can run the
+// warn/mute/kick-style moderation actions specifically - not rank
+// management, recruitment, or application review, which stay leadership-only.
+// ignoreCommandCooldownForMods and allowHigherModsToModerateLower have
+// nothing to hook into yet: this bot has no per-user command cooldown and
+// no role-hierarchy check on moderation actions at all, so both settings
+// are accepted and stored but currently no-ops.
+function isModerator(member) {
+  if (isLeadership(member)) return true;
+  if (!member?.roles?.cache || !member.guild) return false;
+  const { moderatorRoleIds } = getSecuritySettings(member.guild.id);
+  return moderatorRoleIds.some((roleId) => member.roles.cache.has(roleId));
 }
 
 function isSupportReviewer(member) {
@@ -836,6 +855,209 @@ async function applyThirdWarnPunishment(member, auditReason) {
     await member.roles.add(warnPunishmentRoleId, auditReason);
   } else {
     await member.roles.set([], auditReason);
+  }
+}
+
+// Shared warn-issuance core, used by both the admin panel's warn action and
+// automod's "warn" punishment. Caller must already have called
+// syncWarningsFromMemberRoles(member) so warnings[member.id] reflects their
+// current role-based count. Throws if a warn can't be issued (already at
+// 3, or Discord won't let the bot manage them at 2).
+async function issueWarn(member, { reason, issuedBy }) {
+  const warnings = getWarnings();
+  warnings[member.id] ??= { active: [], history: [] };
+  const current = warnings[member.id].active.length;
+  if (current >= 3 || (current === 2 && !member.manageable)) {
+    throw new Error("Варн выдать нельзя");
+  }
+  const issuedAt = new Date().toISOString();
+  warnings[member.id].active.push({ reason, issuedBy, issuedAt });
+  await saveWarnings(warnings);
+  await addUserAudit(member.id, "warn", { action: "add", adminId: issuedBy === "system" ? null : issuedBy, reason, createdAt: issuedAt });
+  const count = warnings[member.id].active.length;
+  if (count < 3) await syncWarnRoles(member, count);
+  await dmUser(member, {
+    embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Получен варн").addFields(
+      { name: "Причина", value: reason },
+      { name: "Всего варнов", value: `${count}/3` },
+      { name: "Администратор", value: issuedBy === "system" ? "Автомодерация" : `<@${issuedBy}>` }
+    )]
+  });
+  if (count >= 3) {
+    await applyThirdWarnPunishment(member, `3/3 варнов. Причина: ${reason}`);
+  }
+  return count;
+}
+
+const MAX_TIMEOUT_MS = 28 * 24 * 60 * 60 * 1000; // Discord's own timeout cap
+
+// Lazily denies the guild's mute role permission to add reactions the first
+// time it's actually needed - matches ensureTicketReviewerParentAccess's
+// "fix permissions on first use" pattern instead of requiring the family to
+// configure this by hand.
+async function ensureMuteRoleBlocksReactions(guild, muteRoleId) {
+  const role = guild.roles.cache.get(muteRoleId);
+  if (!role || !role.permissions.has(PermissionFlagsBits.AddReactions)) return;
+  await role.setPermissions(role.permissions.remove(PermissionFlagsBits.AddReactions)).catch((error) => {
+    console.error(`[${guild.id}] Не удалось запретить роли мьюта добавлять реакции:`, error);
+  });
+}
+
+async function applyMute(member, { durationMs, reason }) {
+  const { muteMode, muteRoleId, muteBlocksReactions } = getSecuritySettings(member.guild.id);
+  if (muteMode === "role" || muteMode === "both") {
+    if (!muteRoleId || !member.guild.roles.cache.has(muteRoleId)) {
+      throw new Error("Роль мьюта не настроена или больше не существует на сервере.");
+    }
+    if (muteBlocksReactions) await ensureMuteRoleBlocksReactions(member.guild, muteRoleId);
+    await member.roles.add(muteRoleId, reason);
+  }
+  if (muteMode === "timeout" || muteMode === "both") {
+    await member.timeout(Math.min(durationMs, MAX_TIMEOUT_MS), reason);
+  }
+}
+
+async function removeMute(member, reason) {
+  const { muteMode, muteRoleId } = getSecuritySettings(member.guild.id);
+  if ((muteMode === "role" || muteMode === "both") && muteRoleId && member.roles.cache.has(muteRoleId)) {
+    await member.roles.remove(muteRoleId, reason);
+  }
+  if (member.communicationDisabledUntil && member.communicationDisabledUntil.getTime() > Date.now()) {
+    await member.timeout(null, reason);
+  }
+}
+
+const AUTOMOD_FILTER_KEYS = [
+  "filterLinks", "filterInvites", "filterScamLinks", "filterBadWords", "filterCapsLock", "filterMentionSpam"
+];
+const INVITE_LINK_PATTERN = /(?:discord\.gg\/|discord(?:app)?\.com\/invite\/)[a-z0-9-]+/i;
+const URL_PATTERN = /https?:\/\/[^\s<>"')\]]+/gi;
+
+// Heuristic patterns for common scam/phishing link styles (fake nitro/steam
+// gift pages) - not a maintained threat-intel feed, just enough to catch the
+// obvious ones. ponytail: static list, revisit if scam patterns evolve.
+const SCAM_LINK_PATTERNS = [
+  /steam(?:community)?[.-].*\.(?:tk|ml|ga|cf|gq|xyz|top)\b/i,
+  /discord(?:app)?-?nitro.*\.(?:tk|ml|ga|cf|gq|xyz|top|ru|info)\b/i,
+  /free-?nitro/i,
+  /dlscord\.|discorcl\.|discrod\./i
+];
+
+function globToRegExp(pattern) {
+  const escaped = pattern.trim().replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp(escaped, "i");
+}
+
+// blocklist: violation if any candidate (URL/word found in the message)
+// matches a list entry. allowlist: violation if something was found but
+// none of it matches - i.e. only listed entries are permitted.
+function listViolation(candidates, list, strategy) {
+  if (!list.length) return strategy === "allowlist" ? candidates.length > 0 : false;
+  const anyMatch = candidates.some((text) => list.some((pattern) => globToRegExp(pattern).test(text)));
+  return strategy === "allowlist" ? !anyMatch && candidates.length > 0 : anyMatch;
+}
+
+function capsLockViolation(text) {
+  const letters = text.replace(/[^a-zA-Zа-яА-ЯёЁ]/g, "");
+  if (letters.length < 10) return false; // too short to judge fairly
+  const upper = letters.replace(/[^A-ZА-ЯЁ]/g, "");
+  return upper.length / letters.length > 0.7;
+}
+
+function mentionSpamViolation(message) {
+  const uniqueMentions = new Set([...message.mentions.users.keys(), ...message.mentions.roles.keys()]);
+  return uniqueMentions.size > 5;
+}
+
+function inAutomodScope(member, channelId, config) {
+  if (config.ignoreAdminsAndMods && isModerator(member)) return false;
+  if (config.targetRoleIds.length && !config.targetRoleIds.some((id) => member.roles.cache.has(id))) return false;
+  if (config.ignoredRoleIds.some((id) => member.roles.cache.has(id))) return false;
+  if (config.targetChannelIds.length && !config.targetChannelIds.includes(channelId)) return false;
+  if (config.ignoredChannelIds.includes(channelId)) return false;
+  return true;
+}
+
+async function applyAutomodPunishment(message, filterType, config, description) {
+  const member = message.member;
+  const reason = `Автомодерация (${filterType}): ${description}`;
+
+  if (config.deleteMessage) await message.delete().catch(() => null);
+
+  if (config.notifyUser) {
+    await dmUserEmbed(message.author, new EmbedBuilder()
+      .setColor(0xeb5757)
+      .setTitle("Сообщение нарушает правила сервера")
+      .setDescription(`Ваше сообщение на сервере **${message.guild.name}** было ${config.deleteMessage ? "удалено" : "отмечено"} автомодерацией.\nПричина: ${description}`));
+  }
+
+  await sendLog(message.guild, new EmbedBuilder()
+    .setColor(0xeb5757)
+    .setTitle("Сработала автомодерация")
+    .setDescription(`<@${message.author.id}> в <#${message.channel.id}>\n${description}`)
+    .addFields({ name: "Наказание", value: config.punishment, inline: true }));
+
+  if (config.punishment === "warn") {
+    await syncWarningsFromMemberRoles(member);
+    await issueWarn(member, { reason, issuedBy: "system" }).catch((error) => {
+      console.error(`[${message.guild.id}] Не удалось выдать варн за автомодерацию:`, error);
+    });
+  } else if (config.punishment === "mute") {
+    await applyMute(member, { durationMs: 60 * 60 * 1000, reason }).catch((error) => {
+      console.error(`[${message.guild.id}] Не удалось замьютить за автомодерацию:`, error);
+    });
+  } else if (config.punishment === "kick") {
+    await member.kick(reason).catch((error) => {
+      console.error(`[${message.guild.id}] Не удалось кикнуть за автомодерацию:`, error);
+    });
+  } else if (config.punishment === "ban") {
+    await member.ban({ reason }).catch((error) => {
+      console.error(`[${message.guild.id}] Не удалось забанить за автомодерацию:`, error);
+    });
+  }
+}
+
+// Runs every enabled filter in order and stops at the first violation - one
+// punishment per message, so a message tripping several filters at once
+// doesn't stack a warn + mute + kick on top of each other.
+async function runAutomod(message) {
+  if (!message.member) return;
+  const security = getSecuritySettings(message.guild.id);
+  const content = message.content ?? "";
+
+  for (const filterType of AUTOMOD_FILTER_KEYS) {
+    if (!security[filterType]) continue;
+    const config = getAutomodFilterConfig(message.guild.id, filterType);
+    if (!inAutomodScope(message.member, message.channel.id, config)) continue;
+
+    let description = null;
+    if (filterType === "filterInvites") {
+      if (INVITE_LINK_PATTERN.test(content)) description = "обнаружена ссылка-приглашение на другой сервер";
+    } else if (filterType === "filterScamLinks") {
+      const urls = content.match(URL_PATTERN) ?? [];
+      if (urls.some((url) => SCAM_LINK_PATTERNS.some((pattern) => pattern.test(url)))) {
+        description = "обнаружена похожая на мошенническую ссылка";
+      }
+    } else if (filterType === "filterLinks") {
+      const urls = content.match(URL_PATTERN) ?? [];
+      if (urls.length && listViolation(urls, config.list, config.strategy)) {
+        description = "ссылка не разрешена настройками фильтра";
+      }
+    } else if (filterType === "filterBadWords") {
+      const words = content.split(/\s+/).filter(Boolean);
+      if (words.length && listViolation(words, config.list, config.strategy)) {
+        description = "сообщение содержит нежелательное слово";
+      }
+    } else if (filterType === "filterCapsLock") {
+      if (capsLockViolation(content)) description = "сообщение написано преимущественно КАПСОМ";
+    } else if (filterType === "filterMentionSpam") {
+      if (mentionSpamViolation(message)) description = "слишком много упоминаний в одном сообщении";
+    }
+
+    if (description) {
+      await applyAutomodPunishment(message, filterType, config, description);
+      return;
+    }
   }
 }
 
@@ -2157,10 +2379,15 @@ async function claimTicketFromActivity(channel, reviewer) {
 
 async function handleMessageCreate(message) {
   if (!message.guild || message.author.bot) return;
-  if (!message.channel.isThread()) return;
 
-  await reloadStorage();
-  await claimTicketFromActivity(message.channel, message.author);
+  if (message.channel.isThread()) {
+    await reloadStorage();
+    await claimTicketFromActivity(message.channel, message.author);
+  }
+
+  await runAutomod(message).catch((error) => {
+    console.error(`[${message.guild.id}] Automod processing failed:`, error);
+  });
 }
 
 client.on(Events.MessageCreate, (message) => {
@@ -2202,6 +2429,15 @@ async function purgeDepartedUser(guild, userId) {
 }
 
 async function handleGuildMemberRemove(member) {
+  const { restoreNicknameOnRejoin, restoreOldRolesOnRejoin, exemptRoleIds } = getGuildConfig(member.guild.id);
+  if (restoreNicknameOnRejoin || restoreOldRolesOnRejoin) {
+    const roleIds = [...member.roles.cache.keys()].filter(
+      (id) => id !== member.guild.id && !exemptRoleIds.includes(id)
+    );
+    await saveDepartedMemberSnapshot(member.guild.id, member.id, { nickname: member.nickname, roleIds }).catch((error) => {
+      console.error(`[${member.guild.id}] Не удалось сохранить снимок участника ${member.id} для восстановления при перезаходе:`, error);
+    });
+  }
   await purgeDepartedUser(member.guild, member.id);
 }
 
@@ -2226,6 +2462,44 @@ async function handleGuildMemberAdd(member) {
   });
   await syncWarningsFromMemberRoles(member);
   await flushStorage();
+
+  const {
+    defaultRoleIds, alwaysAssignDefaultRoles,
+    restoreNicknameOnRejoin, restoreOldRolesOnRejoin, restorableRoleIds
+  } = getGuildConfig(member.guild.id);
+
+  const snapshot = await getDepartedMemberSnapshot(member.guild.id, member.id).catch(() => null);
+  const isRejoin = Boolean(snapshot);
+
+  // "Всегда назначать начальные роли, даже перезашедшим участникам" - off by
+  // default means default roles only go to genuinely new joins, not rejoins.
+  if (defaultRoleIds.length && (alwaysAssignDefaultRoles || !isRejoin)) {
+    const rolesToAdd = defaultRoleIds.filter((id) => member.guild.roles.cache.has(id));
+    if (rolesToAdd.length) {
+      await member.roles.add(rolesToAdd, "Начальные роли при вступлении").catch((error) => {
+        console.error(`[${member.guild.id}] Не удалось выдать начальные роли участнику ${member.id}:`, error);
+      });
+    }
+  }
+
+  if (isRejoin) {
+    if (restoreNicknameOnRejoin && snapshot.nickname) {
+      await member.setNickname(snapshot.nickname, "Восстановление ника при перезаходе").catch((error) => {
+        console.error(`[${member.guild.id}] Не удалось восстановить ник участнику ${member.id}:`, error);
+      });
+    }
+    if (restoreOldRolesOnRejoin && restorableRoleIds.length) {
+      const rolesToRestore = snapshot.roleIds.filter(
+        (id) => restorableRoleIds.includes(id) && member.guild.roles.cache.has(id)
+      );
+      if (rolesToRestore.length) {
+        await member.roles.add(rolesToRestore, "Восстановление ролей при перезаходе").catch((error) => {
+          console.error(`[${member.guild.id}] Не удалось восстановить роли участнику ${member.id}:`, error);
+        });
+      }
+    }
+    await clearDepartedMemberSnapshot(member.guild.id, member.id).catch(() => null);
+  }
 }
 
 client.on(Events.GuildMemberAdd, (member) => {
@@ -2284,6 +2558,11 @@ client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
 });
 
 async function handleInteraction(interaction) {
+  if (interaction.isChatInputCommand() && interaction.guildId && !getGuildConfig(interaction.guildId).enableSlashCommands) {
+    await interaction.reply({ content: noticeMessage("Команды бота отключены на этом сервере."), flags: MessageFlags.Ephemeral }).catch(() => null);
+    return;
+  }
+
   if (interaction.isButton() && interaction.customId.startsWith("action-cancel:")) {
     const id = interaction.customId.slice("action-cancel:".length);
     const pending = pendingConfirmations.get(id);
@@ -2503,6 +2782,73 @@ async function handleInteraction(interaction) {
       return;
     }
 
+    if (commandName === "mute" || commandName === "unmute") {
+      if (!isModerator(interaction.member)) {
+        await interaction.reply({
+          content: noticeMessage("Эту команду может использовать только руководство или модераторы семьи."),
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+      const target = interaction.options.getMember("member");
+      const reason = interaction.options.getString("reason", true);
+      if (!target) {
+        await interaction.reply({ content: errorMessage("Участник не найден на сервере."), flags: MessageFlags.Ephemeral });
+        return;
+      }
+      if (!target.manageable) {
+        await interaction.reply({
+          content: errorMessage("У бота недостаточно прав, чтобы управлять этим участником."),
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      if (commandName === "mute") {
+        const minutes = interaction.options.getInteger("minutes") ?? 60;
+        try {
+          await applyMute(target, { durationMs: minutes * 60 * 1000, reason: `${reason} (выдал: ${interaction.user.tag})` });
+        } catch (error) {
+          await interaction.editReply({ content: errorMessage(error.message) });
+          return;
+        }
+        await dmUserEmbed(target.user, new EmbedBuilder()
+          .setColor(0x000000)
+          .setTitle("Вы замьючены")
+          .addFields(
+            { name: "Причина", value: reason },
+            { name: "Длительность", value: `${minutes} мин.`, inline: true },
+            { name: "Администратор", value: `<@${interaction.user.id}>` }
+          ));
+        await sendLog(interaction.guild, new EmbedBuilder()
+          .setColor(0xeb5757)
+          .setTitle("Участник замьючен")
+          .setDescription(`<@${interaction.user.id}> замьютил <@${target.id}> на ${minutes} мин.`)
+          .addFields({ name: "Причина", value: reason }));
+        await interaction.editReply({ content: successMessage(`<@${target.id}> замьючен на **${minutes} мин.**`) });
+        return;
+      }
+
+      try {
+        await removeMute(target, `${reason} (снял: ${interaction.user.tag})`);
+      } catch (error) {
+        await interaction.editReply({ content: errorMessage(error.message) });
+        return;
+      }
+      await dmUserEmbed(target.user, new EmbedBuilder()
+        .setColor(0x000000)
+        .setTitle("С вас снят мьют")
+        .addFields({ name: "Причина", value: reason }, { name: "Администратор", value: `<@${interaction.user.id}>` }));
+      await sendLog(interaction.guild, new EmbedBuilder()
+        .setColor(0x27ae60)
+        .setTitle("С участника снят мьют")
+        .setDescription(`<@${interaction.user.id}> снял мьют с <@${target.id}>.`)
+        .addFields({ name: "Причина", value: reason }));
+      await interaction.editReply({ content: successMessage(`С <@${target.id}> снят мьют.`) });
+      return;
+    }
   }
 
   if (interaction.isButton() && interaction.customId.startsWith("profile:")) {
@@ -2599,11 +2945,12 @@ async function handleInteraction(interaction) {
   }
 
   if (interaction.isButton() && interaction.customId.startsWith("admin:")) {
-    if (!isLeadership(interaction.member)) {
+    const section = interaction.customId.slice("admin:".length);
+    const sectionAllowed = section === "warn" ? isModerator(interaction.member) : isLeadership(interaction.member);
+    if (!sectionAllowed) {
       await interaction.reply({ content: noticeMessage("Административная панель доступна только руководству семьи."), flags: MessageFlags.Ephemeral });
       return;
     }
-    const section = interaction.customId.slice("admin:".length);
     if (section === "profile") {
       await interaction.showModal(buildAdminMembersModal("profile", "view"));
       return;
@@ -2622,11 +2969,12 @@ async function handleInteraction(interaction) {
   }
 
   if (interaction.isButton() && interaction.customId.startsWith("admin_action:")) {
-    if (!isLeadership(interaction.member)) {
+    const [, system, action] = interaction.customId.split(":");
+    const actionAllowed = system === "warn" ? isModerator(interaction.member) : isLeadership(interaction.member);
+    if (!actionAllowed) {
       await interaction.reply({ content: noticeMessage("Это действие доступно только руководству семьи."), flags: MessageFlags.Ephemeral });
       return;
     }
-    const [, system, action] = interaction.customId.split(":");
     if (!["warn", "rank"].includes(system) || !["add", "remove"].includes(action)) {
       await interaction.reply({ content: errorMessage("Действие административной панели не найдено."), flags: MessageFlags.Ephemeral });
       return;
@@ -2659,11 +3007,12 @@ async function handleInteraction(interaction) {
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith("admin_modal:")) {
-    if (!isLeadership(interaction.member)) {
+    const [, system, action] = interaction.customId.split(":");
+    const modalAllowed = system === "warn" ? isModerator(interaction.member) : isLeadership(interaction.member);
+    if (!modalAllowed) {
       await interaction.reply({ content: noticeMessage("Это действие доступно только руководству семьи."), flags: MessageFlags.Ephemeral });
       return;
     }
-    const [, system, action] = interaction.customId.split(":");
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const members = await resolveAdminMembers(interaction.guild, interaction.fields.getTextInputValue("members"), action === "history" || system === "profile" ? 1 : 10);
     if (!members.length) {
@@ -2730,23 +3079,13 @@ async function handleInteraction(interaction) {
         const warnings = getWarnings();
         warnings[member.id] ??= { active: [], history: [] };
         if (action === "add") {
-          const current = warnings[member.id].active.length;
-          if (current >= 3 || (current === 2 && !member.manageable)) {
+          try {
+            const count = await issueWarn(member, { reason, issuedBy: interaction.user.id });
+            completed.push(`<@${member.id}> — выдан варн **${count}/3**`);
+            logLines.push(`<@${member.id}> — **${count}/3**`);
+          } catch {
             failed.push(`<@${member.id}> — варн выдать нельзя`);
-            continue;
           }
-          const issuedAt = new Date().toISOString();
-          warnings[member.id].active.push({ reason, issuedBy: interaction.user.id, issuedAt });
-          await saveWarnings(warnings);
-          await addUserAudit(member.id, "warn", { action: "add", adminId: interaction.user.id, reason, createdAt: issuedAt });
-          const count = warnings[member.id].active.length;
-          if (count < 3) await syncWarnRoles(member, count);
-          await dmUser(member, { embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Получен варн").addFields({ name: "Причина", value: reason }, { name: "Всего варнов", value: `${count}/3` }, { name: "Администратор", value: `<@${interaction.user.id}>` })] });
-          if (count >= 3) {
-            await applyThirdWarnPunishment(member, `3/3 варнов. Выдал: ${interaction.user.tag}. Причина: ${reason}`);
-          }
-          completed.push(`<@${member.id}> — выдан варн **${count}/3**`);
-          logLines.push(`<@${member.id}> — **${count}/3**`);
         } else {
           const removed = warnings[member.id].active.pop();
           await saveWarnings(warnings);

@@ -28,7 +28,38 @@ const globalCommands = [
     ),
   new SlashCommandBuilder()
     .setName("ping")
-    .setDescription("Проверить, что бот на связи, и посмотреть задержку.")
+    .setDescription("Проверить, что бот на связи, и посмотреть задержку."),
+  // Discord's own ModerateMembers default is a coarse guild-side gate - the
+  // actual check (moderator_role_ids or leadership, see isModerator in
+  // index.js) happens in the interaction handler, since Discord has no
+  // concept of this bot's custom moderator-role list.
+  new SlashCommandBuilder()
+    .setName("mute")
+    .setDescription("Замьютить участника.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
+    .addUserOption((option) =>
+      option.setName("member").setDescription("Участник, которого нужно замьютить").setRequired(true)
+    )
+    .addStringOption((option) =>
+      option.setName("reason").setDescription("Причина мьюта").setRequired(true)
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName("minutes")
+        .setDescription("Длительность в минутах (по умолчанию 60, максимум 40320 — 28 суток)")
+        .setMinValue(1)
+        .setMaxValue(40320)
+    ),
+  new SlashCommandBuilder()
+    .setName("unmute")
+    .setDescription("Снять мьют с участника.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
+    .addUserOption((option) =>
+      option.setName("member").setDescription("Участник, с которого нужно снять мьют").setRequired(true)
+    )
+    .addStringOption((option) =>
+      option.setName("reason").setDescription("Причина снятия мьюта").setRequired(true)
+    )
 ].map((command) => command.toJSON());
 
 async function main() {

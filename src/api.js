@@ -13,14 +13,19 @@ const {
   deleteDepartmentForGuild,
   getAfkSessionsForApi,
   getAuditLogForGuild,
+  getAutomodFilterConfig,
+  getAutomodFilterConfigsForGuild,
   getBansForGuild,
   getDepartmentsForGuild,
   getGuildConfig,
   getGuildMembersForApi,
+  getSecuritySettings,
   getTicketsForGuild,
   removeBanForGuild,
+  updateAutomodFilterConfig,
   updateDepartmentForGuild,
-  updateGuildConfig
+  updateGuildConfig,
+  updateSecuritySettings
 } = require("./storage");
 
 const PATCHABLE_CONFIG_FIELDS = new Set([
@@ -35,7 +40,44 @@ const PATCHABLE_CONFIG_FIELDS = new Set([
   "adminPanelChannelId",
   "departmentsEnabled",
   "warnPunishmentMode",
-  "warnPunishmentRoleId"
+  "warnPunishmentRoleId",
+  "defaultRoleIds",
+  "alwaysAssignDefaultRoles",
+  "restoreNicknameOnRejoin",
+  "restoreOldRolesOnRejoin",
+  "restorableRoleIds",
+  "exemptRoleIds",
+  "enableSlashCommands",
+  "enableTextCommands"
+]);
+
+const PATCHABLE_SECURITY_FIELDS = new Set([
+  "moderatorRoleIds",
+  "ignoreCommandCooldownForMods",
+  "allowHigherModsToModerateLower",
+  "filterLinks",
+  "filterInvites",
+  "filterScamLinks",
+  "filterBadWords",
+  "filterCapsLock",
+  "filterMentionSpam",
+  "muteMode",
+  "muteRoleId",
+  "muteBlocksReactions"
+]);
+
+const PATCHABLE_AUTOMOD_FIELDS = new Set([
+  "deleteMessage",
+  "punishment",
+  "strategy",
+  "list",
+  "notifyUser",
+  "ignoreAdminsAndMods",
+  "ignoreSlashCommands",
+  "targetRoleIds",
+  "ignoredRoleIds",
+  "targetChannelIds",
+  "ignoredChannelIds"
 ]);
 
 function readJsonBody(req) {
@@ -165,6 +207,49 @@ async function handleDepartments(req, res, guildId, departmentId) {
   return sendJson(res, 405, { error: "Method not allowed" });
 }
 
+async function handleSecurity(req, res, guildId) {
+  if (req.method === "GET") return sendJson(res, 200, getSecuritySettings(guildId));
+  if (req.method === "PUT") {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message });
+    }
+    const patch = {};
+    for (const key of Object.keys(body)) {
+      if (PATCHABLE_SECURITY_FIELDS.has(key)) patch[key] = body[key];
+    }
+    if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No recognized fields in body" });
+    return sendJson(res, 200, await updateSecuritySettings(guildId, patch));
+  }
+  return sendJson(res, 405, { error: "Method not allowed" });
+}
+
+async function handleAutomod(req, res, guildId, filterType) {
+  if (filterType) {
+    if (req.method === "GET") return sendJson(res, 200, getAutomodFilterConfig(guildId, filterType));
+    if (req.method === "PUT") {
+      let body;
+      try {
+        body = await readJsonBody(req);
+      } catch (error) {
+        return sendJson(res, 400, { error: error.message });
+      }
+      const patch = {};
+      for (const key of Object.keys(body)) {
+        if (PATCHABLE_AUTOMOD_FIELDS.has(key)) patch[key] = body[key];
+      }
+      if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No recognized fields in body" });
+      return sendJson(res, 200, await updateAutomodFilterConfig(guildId, filterType, patch));
+    }
+    return sendJson(res, 405, { error: "Method not allowed" });
+  }
+
+  if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
+  return sendJson(res, 200, getAutomodFilterConfigsForGuild(guildId));
+}
+
 async function handleApiRequest(client, req, res, url) {
   if (!isAuthorized(req)) return sendJson(res, 401, { error: "Unauthorized" });
 
@@ -199,6 +284,8 @@ async function handleApiRequest(client, req, res, url) {
     return;
   }
   if (resource === "departments" && rest.length <= 1) return handleDepartments(req, res, guildId, rest[0]);
+  if (resource === "security") return handleSecurity(req, res, guildId);
+  if (resource === "automod" && rest.length <= 1) return handleAutomod(req, res, guildId, rest[0]);
 
   if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
 

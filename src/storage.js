@@ -7,6 +7,8 @@ const ROOT = path.join(__dirname, "..");
 const state = {
   applications: {},
   guildConfigs: {}, // guildId -> per-guild config (replaces the old single config.json)
+  guildSecuritySettings: {}, // guildId -> moderator/mute/automod-toggle config
+  automodFilterConfigs: {}, // guildId -> filterType -> per-filter automod config
   ranks: {},
   supportTickets: {},
   users: {},
@@ -135,6 +137,8 @@ async function initStorage() {
 function resetState() {
   state.applications = {};
   state.guildConfigs = {};
+  state.guildSecuritySettings = {};
+  state.automodFilterConfigs = {};
   state.ranks = {};
   state.supportTickets = {};
   state.users = {};
@@ -167,7 +171,53 @@ async function loadState() {
       adminPanelChannelId: row.admin_panel_channel_id,
       departmentsEnabled: row.departments_enabled,
       warnPunishmentMode: row.warn_punishment_mode,
-      warnPunishmentRoleId: row.warn_punishment_role_id
+      warnPunishmentRoleId: row.warn_punishment_role_id,
+      defaultRoleIds: row.default_role_ids ?? [],
+      alwaysAssignDefaultRoles: row.always_assign_default_roles,
+      restoreNicknameOnRejoin: row.restore_nickname_on_rejoin,
+      restoreOldRolesOnRejoin: row.restore_old_roles_on_rejoin,
+      restorableRoleIds: row.restorable_role_ids ?? [],
+      exemptRoleIds: row.exempt_role_ids ?? [],
+      enableSlashCommands: row.enable_slash_commands,
+      enableTextCommands: row.enable_text_commands
+    };
+  }
+
+  const { rows: securityRows } = await pool.query("SELECT * FROM guild_security_settings");
+  state.guildSecuritySettings = {};
+  for (const row of securityRows) {
+    state.guildSecuritySettings[row.guild_id] = {
+      moderatorRoleIds: row.moderator_role_ids ?? [],
+      ignoreCommandCooldownForMods: row.ignore_command_cooldown_for_mods,
+      allowHigherModsToModerateLower: row.allow_higher_mods_to_moderate_lower,
+      filterLinks: row.filter_links,
+      filterInvites: row.filter_invites,
+      filterScamLinks: row.filter_scam_links,
+      filterBadWords: row.filter_bad_words,
+      filterCapsLock: row.filter_caps_lock,
+      filterMentionSpam: row.filter_mention_spam,
+      muteMode: row.mute_mode,
+      muteRoleId: row.mute_role_id,
+      muteBlocksReactions: row.mute_blocks_reactions
+    };
+  }
+
+  const { rows: automodRows } = await pool.query("SELECT * FROM automod_filter_config");
+  state.automodFilterConfigs = {};
+  for (const row of automodRows) {
+    state.automodFilterConfigs[row.guild_id] ??= {};
+    state.automodFilterConfigs[row.guild_id][row.filter_type] = {
+      deleteMessage: row.delete_message,
+      punishment: row.punishment,
+      strategy: row.strategy,
+      list: row.list ?? [],
+      notifyUser: row.notify_user,
+      ignoreAdminsAndMods: row.ignore_admins_and_mods,
+      ignoreSlashCommands: row.ignore_slash_commands,
+      targetRoleIds: row.target_role_ids ?? [],
+      ignoredRoleIds: row.ignored_role_ids ?? [],
+      targetChannelIds: row.target_channel_ids ?? [],
+      ignoredChannelIds: row.ignored_channel_ids ?? []
     };
   }
 
@@ -275,12 +325,59 @@ const EMPTY_GUILD_CONFIG = {
   adminPanelChannelId: null,
   departmentsEnabled: true,
   warnPunishmentMode: "stripRoles",
-  warnPunishmentRoleId: null
+  warnPunishmentRoleId: null,
+  defaultRoleIds: [],
+  alwaysAssignDefaultRoles: false,
+  restoreNicknameOnRejoin: false,
+  restoreOldRolesOnRejoin: false,
+  restorableRoleIds: [],
+  exemptRoleIds: [],
+  enableSlashCommands: true,
+  enableTextCommands: true
 };
 // A guild with no row yet (bot just joined, dashboard not configured) gets
 // an empty-but-shaped config rather than undefined, so callers can always
 // read e.g. `.leadershipRoleIds` without a null check.
 function getGuildConfig(guildId) { return state.guildConfigs[guildId] ?? EMPTY_GUILD_CONFIG; }
+
+const EMPTY_SECURITY_SETTINGS = {
+  moderatorRoleIds: [],
+  ignoreCommandCooldownForMods: false,
+  allowHigherModsToModerateLower: false,
+  filterLinks: false,
+  filterInvites: true,
+  filterScamLinks: true,
+  filterBadWords: false,
+  filterCapsLock: false,
+  filterMentionSpam: false,
+  muteMode: "timeout",
+  muteRoleId: null,
+  muteBlocksReactions: false
+};
+function getSecuritySettings(guildId) { return state.guildSecuritySettings[guildId] ?? EMPTY_SECURITY_SETTINGS; }
+
+const EMPTY_AUTOMOD_FILTER_CONFIG = {
+  deleteMessage: true,
+  punishment: "none",
+  strategy: "blocklist",
+  list: [],
+  notifyUser: false,
+  ignoreAdminsAndMods: false,
+  ignoreSlashCommands: false,
+  targetRoleIds: [],
+  ignoredRoleIds: [],
+  targetChannelIds: [],
+  ignoredChannelIds: []
+};
+function getAutomodFilterConfig(guildId, filterType) {
+  return state.automodFilterConfigs[guildId]?.[filterType] ?? EMPTY_AUTOMOD_FILTER_CONFIG;
+}
+// All configured filters for a guild, keyed by filter type - a filter with
+// no saved row just isn't in this map, callers fall back to
+// EMPTY_AUTOMOD_FILTER_CONFIG for it same as getAutomodFilterConfig does.
+function getAutomodFilterConfigsForGuild(guildId) {
+  return state.automodFilterConfigs[guildId] ?? {};
+}
 
 // Registers a guild the bot is in (called on boot for every guild already
 // joined, and on guildCreate for one newly joined) - every other
@@ -312,8 +409,131 @@ const GUILD_CONFIG_COLUMNS = {
   adminPanelChannelId: "admin_panel_channel_id",
   departmentsEnabled: "departments_enabled",
   warnPunishmentMode: "warn_punishment_mode",
-  warnPunishmentRoleId: "warn_punishment_role_id"
+  warnPunishmentRoleId: "warn_punishment_role_id",
+  defaultRoleIds: "default_role_ids",
+  alwaysAssignDefaultRoles: "always_assign_default_roles",
+  restoreNicknameOnRejoin: "restore_nickname_on_rejoin",
+  restoreOldRolesOnRejoin: "restore_old_roles_on_rejoin",
+  restorableRoleIds: "restorable_role_ids",
+  exemptRoleIds: "exempt_role_ids",
+  enableSlashCommands: "enable_slash_commands",
+  enableTextCommands: "enable_text_commands"
 };
+
+const SECURITY_SETTINGS_COLUMNS = {
+  moderatorRoleIds: "moderator_role_ids",
+  ignoreCommandCooldownForMods: "ignore_command_cooldown_for_mods",
+  allowHigherModsToModerateLower: "allow_higher_mods_to_moderate_lower",
+  filterLinks: "filter_links",
+  filterInvites: "filter_invites",
+  filterScamLinks: "filter_scam_links",
+  filterBadWords: "filter_bad_words",
+  filterCapsLock: "filter_caps_lock",
+  filterMentionSpam: "filter_mention_spam",
+  muteMode: "mute_mode",
+  muteRoleId: "mute_role_id",
+  muteBlocksReactions: "mute_blocks_reactions"
+};
+
+// Same partial-update shape as updateGuildConfig - merges into the cache
+// immediately, queues the actual write.
+function updateSecuritySettings(guildId, patch) {
+  const current = getSecuritySettings(guildId);
+  const merged = { ...current, ...patch };
+  state.guildSecuritySettings[guildId] = merged;
+
+  const setClauses = [];
+  const params = [guildId];
+  for (const [jsKey, column] of Object.entries(SECURITY_SETTINGS_COLUMNS)) {
+    if (!(jsKey in patch)) continue;
+    params.push(patch[jsKey]);
+    setClauses.push(`${column} = $${params.length}`);
+  }
+  if (!setClauses.length) return Promise.resolve(merged);
+
+  return queueWrite("update guild security settings", () =>
+    pool.query(
+      `INSERT INTO guild_security_settings (guild_id) VALUES ($1)
+       ON CONFLICT (guild_id) DO NOTHING`,
+      [guildId]
+    ).then(() =>
+      pool.query(
+        `UPDATE guild_security_settings SET ${setClauses.join(", ")}, updated_at = now() WHERE guild_id = $1`,
+        params
+      )
+    )
+  ).then(() => merged);
+}
+
+const AUTOMOD_FILTER_CONFIG_COLUMNS = {
+  deleteMessage: "delete_message",
+  punishment: "punishment",
+  strategy: "strategy",
+  list: "list",
+  notifyUser: "notify_user",
+  ignoreAdminsAndMods: "ignore_admins_and_mods",
+  ignoreSlashCommands: "ignore_slash_commands",
+  targetRoleIds: "target_role_ids",
+  ignoredRoleIds: "ignored_role_ids",
+  targetChannelIds: "target_channel_ids",
+  ignoredChannelIds: "ignored_channel_ids"
+};
+
+function updateAutomodFilterConfig(guildId, filterType, patch) {
+  const current = getAutomodFilterConfig(guildId, filterType);
+  const merged = { ...current, ...patch };
+  state.automodFilterConfigs[guildId] ??= {};
+  state.automodFilterConfigs[guildId][filterType] = merged;
+
+  const setClauses = [];
+  const params = [guildId, filterType];
+  for (const [jsKey, column] of Object.entries(AUTOMOD_FILTER_CONFIG_COLUMNS)) {
+    if (!(jsKey in patch)) continue;
+    params.push(patch[jsKey]);
+    setClauses.push(`${column} = $${params.length}`);
+  }
+  if (!setClauses.length) return Promise.resolve(merged);
+
+  return queueWrite("update automod filter config", () =>
+    pool.query(
+      `INSERT INTO automod_filter_config (guild_id, filter_type) VALUES ($1, $2)
+       ON CONFLICT (guild_id, filter_type) DO NOTHING`,
+      [guildId, filterType]
+    ).then(() =>
+      pool.query(
+        `UPDATE automod_filter_config SET ${setClauses.join(", ")}, updated_at = now() WHERE guild_id = $1 AND filter_type = $2`,
+        params
+      )
+    )
+  ).then(() => merged);
+}
+
+// Leave-snapshot for rejoin restoration - not cached (read/written rarely,
+// only around member add/remove), queried directly like the department
+// functions below.
+async function saveDepartedMemberSnapshot(guildId, discordId, { nickname, roleIds }) {
+  await queueWrite("save departed member snapshot", () =>
+    pool.query(
+      `INSERT INTO guild_departed_members (guild_id, discord_id, nickname, role_ids, left_at)
+       VALUES ($1, $2, $3, $4, now())
+       ON CONFLICT (guild_id, discord_id) DO UPDATE SET nickname = EXCLUDED.nickname, role_ids = EXCLUDED.role_ids, left_at = now()`,
+      [guildId, discordId, nickname ?? null, roleIds ?? []]
+    )
+  );
+}
+
+async function getDepartedMemberSnapshot(guildId, discordId) {
+  const { rows } = await pool.query(
+    `SELECT nickname, role_ids FROM guild_departed_members WHERE guild_id = $1 AND discord_id = $2`,
+    [guildId, discordId]
+  );
+  if (!rows[0]) return null;
+  return { nickname: rows[0].nickname, roleIds: rows[0].role_ids ?? [] };
+}
+
+async function clearDepartedMemberSnapshot(guildId, discordId) {
+  await pool.query(`DELETE FROM guild_departed_members WHERE guild_id = $1 AND discord_id = $2`, [guildId, discordId]);
+}
 
 // Partial update - only the keys present in `patch` are touched, so the
 // dashboard can save one field (e.g. just the log channel) without
@@ -864,6 +1084,7 @@ async function closeStorage() {
 module.exports = {
   addBanForGuild,
   addMemberToDepartment,
+  clearDepartedMemberSnapshot,
   closeStorage,
   createDepartmentForGuild,
   deleteDepartmentForGuild,
@@ -873,13 +1094,17 @@ module.exports = {
   getAfkSessionsForApi,
   getApplications,
   getAuditLogForGuild,
+  getAutomodFilterConfig,
+  getAutomodFilterConfigsForGuild,
   getBansForGuild,
+  getDepartedMemberSnapshot,
   getDepartmentById,
   getDepartmentsForGuild,
   getGameAfkSession,
   getGuildConfig,
   getGuildMembersForApi,
   getRankHistory,
+  getSecuritySettings,
   getSupportTickets,
   getTicketsForGuild,
   getUserDb,
@@ -889,6 +1114,7 @@ module.exports = {
   removeBanForGuild,
   removeGameAfkSession,
   saveApplications,
+  saveDepartedMemberSnapshot,
   saveGameAfkSession,
   saveRankHistory,
   saveSupportTickets,
@@ -896,7 +1122,9 @@ module.exports = {
   saveWarnings,
   syncUserProfile,
   takeExpiredGameAfkSessions,
+  updateAutomodFilterConfig,
   updateDepartmentForGuild,
   updateGuildConfig,
+  updateSecuritySettings,
   upsertGuild
 };

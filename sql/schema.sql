@@ -136,24 +136,6 @@ CREATE TABLE IF NOT EXISTS guild_security_settings (
   updated_at                          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS guild_bot_settings (
-  guild_id                     TEXT PRIMARY KEY REFERENCES guilds(id) ON DELETE CASCADE,
-  interface_language           TEXT NOT NULL DEFAULT 'ru',
-  system_message_color         TEXT NOT NULL DEFAULT '#79040C',
-  enable_slash_commands        BOOLEAN NOT NULL DEFAULT TRUE,
-  enable_text_commands         BOOLEAN NOT NULL DEFAULT TRUE,
-  trusted_admin_role_ids       TEXT[] NOT NULL DEFAULT '{}',
-  default_role_ids             TEXT[] NOT NULL DEFAULT '{}',
-  always_assign_default_roles  BOOLEAN NOT NULL DEFAULT FALSE,
-  restore_nickname_on_rejoin   BOOLEAN NOT NULL DEFAULT FALSE,
-  restore_old_roles_on_rejoin  BOOLEAN NOT NULL DEFAULT FALSE,
-  restorable_role_ids          TEXT[] NOT NULL DEFAULT '{}',
-  exempt_role_ids              TEXT[] NOT NULL DEFAULT '{}',
-  project                      TEXT, -- RP platform this family plays on, e.g. "majestic" | "russiaonline" | "gta5rp"
-  server                       TEXT, -- city/server within `project`
-  updated_at                   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 -- Bot-operational per-guild config that used to live in the single,
 -- hardcoded config.json - which channel is which panel, which roles mean
 -- what. Replacing this (a JSON file baked into the one deployment) is what
@@ -181,17 +163,35 @@ CREATE TABLE IF NOT EXISTS guild_config (
   -- warn_punishment_role_id instead of touching their other roles).
   warn_punishment_mode          TEXT NOT NULL DEFAULT 'stripRoles',
   warn_punishment_role_id       TEXT,
+  -- Roles auto-assigned to a member on join (see always_assign_default_roles
+  -- below for whether a detected rejoin also gets them).
+  default_role_ids              TEXT[] NOT NULL DEFAULT '{}',
+  always_assign_default_roles   BOOLEAN NOT NULL DEFAULT FALSE,
+  restore_nickname_on_rejoin    BOOLEAN NOT NULL DEFAULT FALSE,
+  restore_old_roles_on_rejoin   BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Only roles in this set are eligible to be restored on rejoin, even if
+  -- the departed member had others - scopes what the site owner is willing
+  -- to hand back automatically vs. what should require a human look.
+  restorable_role_ids           TEXT[] NOT NULL DEFAULT '{}',
+  -- Roles never captured in a leave-snapshot at all, e.g. temporary/punitive
+  -- roles that should never silently come back on rejoin.
+  exempt_role_ids               TEXT[] NOT NULL DEFAULT '{}',
+  enable_slash_commands         BOOLEAN NOT NULL DEFAULT TRUE,
+  enable_text_commands          BOOLEAN NOT NULL DEFAULT TRUE,
   updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- One row per (guild, module) - a module absent here is enabled by default,
--- only owner-disabled modules get an explicit row.
-CREATE TABLE IF NOT EXISTS guild_modules (
+-- One row per departed member with something worth restoring if they rejoin
+-- (nickname and/or exempt_role_ids-excluded roles they held at the time).
+-- Cleared once consumed by a rejoin, so this never grows unbounded from
+-- members who left for good.
+CREATE TABLE IF NOT EXISTS guild_departed_members (
   guild_id    TEXT NOT NULL REFERENCES guilds(id) ON DELETE CASCADE,
-  module_key  TEXT NOT NULL, -- "warnings" | "tickets" | "afk" | "blacklist" | "departments"
-  enabled     BOOLEAN NOT NULL DEFAULT TRUE,
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (guild_id, module_key)
+  discord_id  TEXT NOT NULL,
+  nickname    TEXT,
+  role_ids    TEXT[] NOT NULL DEFAULT '{}',
+  left_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (guild_id, discord_id)
 );
 
 CREATE TABLE IF NOT EXISTS guild_departments (
