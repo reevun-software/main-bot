@@ -38,7 +38,6 @@ const PATCHABLE_CONFIG_FIELDS = new Set([
   "applicationPanelChannelId",
   "supportPanelChannelId",
   "adminPanelChannelId",
-  "departmentsEnabled",
   "warnPunishmentMode",
   "warnPunishmentRoleId",
   "defaultRoleIds",

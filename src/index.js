@@ -38,6 +38,7 @@ const {
   getActiveGameAfkSessions,
   getApplications,
   getAutomodFilterConfig,
+  getBansForGuild,
   getDepartedMemberSnapshot,
   getDepartmentById,
   getDepartmentsForGuild,
@@ -1190,8 +1191,7 @@ const APPLICATION_INFO_TEXT =
 // (new, or departments explicitly disabled) gets one generic "apply to
 // the family" button instead of a section picker.
 async function buildApplicationPanel(guildId) {
-  const { departmentsEnabled } = getGuildConfig(guildId);
-  const departments = departmentsEnabled ? await getDepartmentsForGuild(guildId) : [];
+  const departments = await getDepartmentsForGuild(guildId);
   const useDepartments = departments.length > 0;
   const openDepartments = departments.filter((d) => d.recruitmentOpen);
 
@@ -2498,6 +2498,18 @@ client.on(Events.GuildBanAdd, (ban) => {
 async function handleGuildMemberAdd(member) {
   await reloadStorage();
   if (member.user.bot) return;
+
+  const bans = await getBansForGuild(member.guild.id).catch(() => []);
+  const matchedBan = bans.find((ban) => ban.discordUserId === member.id);
+  if (matchedBan) {
+    await member.ban({
+      reason: `Пользователь находится в чёрном списке (совпадение: запись #${matchedBan.id})`
+    }).catch((error) => {
+      console.error(`[${member.guild.id}] Не удалось забанить участника ${member.id} из чёрного списка:`, error);
+    });
+    return;
+  }
+
   await syncUserProfile(member.id, {
     username: member.user.username,
     currentRank: getRankFromMemberRoles(member)
