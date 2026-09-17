@@ -77,6 +77,10 @@ CREATE TABLE IF NOT EXISTS tickets (
   capt_role                 TEXT,
   ooc_age                   TEXT,
   details                   TEXT,
+  characters_link           TEXT,
+  -- [{"label", "value"}] - set instead of ooc_age/details/characters_link
+  -- when the department that was applied to has its own custom questions.
+  custom_answers            JSONB NOT NULL DEFAULT '[]'::jsonb,
   claimed_by                TEXT,
   decided_by                TEXT,
   decision_reason           TEXT,
@@ -171,6 +175,11 @@ CREATE TABLE IF NOT EXISTS guild_config (
   -- button) from "departments exist but explicitly disabled" (same
   -- fallback, different reason). Defaults true like every module.
   departments_enabled           BOOLEAN NOT NULL DEFAULT TRUE,
+  -- What happens on a member's 3rd active warn: 'stripRoles' (default,
+  -- historical behavior) | 'kick' | 'ban' | 'assignRole' (uses
+  -- warn_punishment_role_id instead of touching their other roles).
+  warn_punishment_mode          TEXT NOT NULL DEFAULT 'stripRoles',
+  warn_punishment_role_id       TEXT,
   updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -193,6 +202,11 @@ CREATE TABLE IF NOT EXISTS guild_departments (
   -- application panel lists only open departments, and shows a single
   -- generic "apply to the family" button instead when a guild has none.
   recruitment_open    BOOLEAN NOT NULL DEFAULT TRUE,
+  -- Custom application-form questions for this department, up to 4 (a 5th
+  -- modal field is always the fixed IC-name/level/Static-ID one - see
+  -- buildApplicationModal). [{"id", "label", "style": "short"|"paragraph",
+  -- "required"}]. Empty means "use the default question set".
+  questions           JSONB NOT NULL DEFAULT '[]'::jsonb,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS guild_departments_guild_id_idx ON guild_departments (guild_id);

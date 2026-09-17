@@ -179,7 +179,9 @@ async function loadState() {
       applicationPanelChannelId: row.application_panel_channel_id,
       supportPanelChannelId: row.support_panel_channel_id,
       adminPanelChannelId: row.admin_panel_channel_id,
-      departmentsEnabled: row.departments_enabled
+      departmentsEnabled: row.departments_enabled,
+      warnPunishmentMode: row.warn_punishment_mode,
+      warnPunishmentRoleId: row.warn_punishment_role_id
     };
   }
 
@@ -236,6 +238,8 @@ async function loadState() {
         captRole: row.capt_role,
         oocAge: row.ooc_age,
         reason: row.details,
+        charactersLink: row.characters_link,
+        customAnswers: row.custom_answers?.length ? row.custom_answers : null,
         requestType: row.request_type,
         claimedBy: row.claimed_by,
         closedBy: row.decided_by,
@@ -283,7 +287,9 @@ const EMPTY_GUILD_CONFIG = {
   applicationPanelChannelId: null,
   supportPanelChannelId: null,
   adminPanelChannelId: null,
-  departmentsEnabled: true
+  departmentsEnabled: true,
+  warnPunishmentMode: "stripRoles",
+  warnPunishmentRoleId: null
 };
 // A guild with no row yet (bot just joined, dashboard not configured) gets
 // an empty-but-shaped config rather than undefined, so callers can always
@@ -318,7 +324,9 @@ const GUILD_CONFIG_COLUMNS = {
   applicationPanelChannelId: "application_panel_channel_id",
   supportPanelChannelId: "support_panel_channel_id",
   adminPanelChannelId: "admin_panel_channel_id",
-  departmentsEnabled: "departments_enabled"
+  departmentsEnabled: "departments_enabled",
+  warnPunishmentMode: "warn_punishment_mode",
+  warnPunishmentRoleId: "warn_punishment_role_id"
 };
 
 // Partial update - only the keys present in `patch` are touched, so the
@@ -467,13 +475,14 @@ function departmentRowToApi(row) {
     id: row.id,
     name: row.name,
     memberDiscordIds: row.member_discord_ids ?? [],
-    recruitmentOpen: row.recruitment_open
+    recruitmentOpen: row.recruitment_open,
+    questions: row.questions ?? []
   };
 }
 
 async function getDepartmentsForGuild(guildId) {
   const { rows } = await pool.query(
-    `SELECT id, name, member_discord_ids, recruitment_open FROM guild_departments WHERE guild_id = $1 ORDER BY id`,
+    `SELECT id, name, member_discord_ids, recruitment_open, questions FROM guild_departments WHERE guild_id = $1 ORDER BY id`,
     [guildId]
   );
   return rows.map(departmentRowToApi);
@@ -481,7 +490,7 @@ async function getDepartmentsForGuild(guildId) {
 
 async function getDepartmentById(guildId, departmentId) {
   const { rows } = await pool.query(
-    `SELECT id, name, member_discord_ids, recruitment_open FROM guild_departments WHERE guild_id = $1 AND id = $2`,
+    `SELECT id, name, member_discord_ids, recruitment_open, questions FROM guild_departments WHERE guild_id = $1 AND id = $2`,
     [guildId, departmentId]
   );
   return rows[0] ? departmentRowToApi(rows[0]) : null;
@@ -489,7 +498,7 @@ async function getDepartmentById(guildId, departmentId) {
 
 async function createDepartmentForGuild(guildId, name) {
   const { rows } = await pool.query(
-    `INSERT INTO guild_departments (guild_id, name) VALUES ($1, $2) RETURNING id, name, member_discord_ids, recruitment_open`,
+    `INSERT INTO guild_departments (guild_id, name) VALUES ($1, $2) RETURNING id, name, member_discord_ids, recruitment_open, questions`,
     [guildId, name]
   );
   return departmentRowToApi(rows[0]);
@@ -499,7 +508,9 @@ async function deleteDepartmentForGuild(guildId, departmentId) {
   await pool.query(`DELETE FROM guild_departments WHERE guild_id = $1 AND id = $2`, [guildId, departmentId]);
 }
 
-async function updateDepartmentForGuild(guildId, departmentId, { memberDiscordIds, recruitmentOpen }) {
+// Questions are capped at 4 here too (not just in the dashboard UI) since a
+// 5th modal field is always the fixed IC-name/level/Static-ID one.
+async function updateDepartmentForGuild(guildId, departmentId, { memberDiscordIds, recruitmentOpen, questions }) {
   const setClauses = [];
   const params = [guildId, departmentId];
   if (memberDiscordIds !== undefined) {
@@ -510,10 +521,14 @@ async function updateDepartmentForGuild(guildId, departmentId, { memberDiscordId
     params.push(recruitmentOpen);
     setClauses.push(`recruitment_open = $${params.length}`);
   }
+  if (questions !== undefined) {
+    params.push(JSON.stringify(questions.slice(0, 4)));
+    setClauses.push(`questions = $${params.length}::jsonb`);
+  }
   if (!setClauses.length) return getDepartmentById(guildId, departmentId);
   const { rows } = await pool.query(
     `UPDATE guild_departments SET ${setClauses.join(", ")} WHERE guild_id = $1 AND id = $2
-     RETURNING id, name, member_discord_ids, recruitment_open`,
+     RETURNING id, name, member_discord_ids, recruitment_open, questions`,
     params
   );
   return rows[0] ? departmentRowToApi(rows[0]) : null;
@@ -823,15 +838,18 @@ function saveApplications(applications) {
       await client.query(
          `INSERT INTO tickets
          (category, guild_id, ticket_key, uid, user_id, status, request_type, ic_name, character_level,
-          character_static_id, capt_role, ooc_age, details, claimed_by, decided_by, decision_reason,
+          character_static_id, capt_role, ooc_age, details, characters_link, custom_answers, claimed_by,
+          decided_by, decision_reason,
           channel_id, message_id, announcement_channel_id, announcement_message_id,
           created_at, updated_at, closed_at)
-         VALUES ('application', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
+         VALUES ('application', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
         [application.guildId ?? null, applicationKey, application.uid ?? null, application.userId,
           application.status ?? "new", application.requestType ?? "rp", characterParts[0] || null,
           characterParts[1] || null, characterParts[2] || null, application.captRole ?? null,
           application.oocAge ?? null,
           application.reason ?? null,
+          application.charactersLink ?? null,
+          JSON.stringify(application.customAnswers ?? []),
           application.claimedBy ?? null,
           application.closedBy ?? null,
           application.decisionReason ?? null,

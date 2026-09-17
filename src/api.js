@@ -33,7 +33,9 @@ const PATCHABLE_CONFIG_FIELDS = new Set([
   "applicationPanelChannelId",
   "supportPanelChannelId",
   "adminPanelChannelId",
-  "departmentsEnabled"
+  "departmentsEnabled",
+  "warnPunishmentMode",
+  "warnPunishmentRoleId"
 ]);
 
 function readJsonBody(req) {
@@ -124,6 +126,17 @@ async function handleDepartments(req, res, guildId, departmentId) {
       const patch = {};
       if (Array.isArray(body.memberDiscordIds)) patch.memberDiscordIds = body.memberDiscordIds;
       if (typeof body.recruitmentOpen === "boolean") patch.recruitmentOpen = body.recruitmentOpen;
+      if (Array.isArray(body.questions)) {
+        patch.questions = body.questions
+          .filter((q) => q && typeof q.label === "string" && q.label.trim())
+          .slice(0, 4)
+          .map((q) => ({
+            id: String(q.id ?? Math.random().toString(36).slice(2)),
+            label: q.label.slice(0, 45),
+            style: q.style === "paragraph" ? "paragraph" : "short",
+            required: q.required !== false
+          }));
+      }
       if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No recognized fields in body" });
       const updated = await updateDepartmentForGuild(guildId, departmentId, patch);
       if (!updated) return sendJson(res, 404, { error: "Department not found" });

@@ -151,6 +151,7 @@ async function main() {
       CREATE INDEX IF NOT EXISTS guild_departments_guild_id_idx ON guild_departments (guild_id);
     `);
     await client.query(`ALTER TABLE guild_departments ADD COLUMN IF NOT EXISTS recruitment_open BOOLEAN NOT NULL DEFAULT TRUE;`);
+    await client.query(`ALTER TABLE guild_departments ADD COLUMN IF NOT EXISTS questions JSONB NOT NULL DEFAULT '[]'::jsonb;`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS automod_filter_config (
@@ -189,6 +190,8 @@ async function main() {
       );
     `);
     await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS departments_enabled BOOLEAN NOT NULL DEFAULT TRUE;`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS warn_punishment_mode TEXT NOT NULL DEFAULT 'stripRoles';`);
+    await client.query(`ALTER TABLE guild_config ADD COLUMN IF NOT EXISTS warn_punishment_role_id TEXT;`);
 
     // rank_role_ids is {"<rank>": {roleIds: [...], label, nicknamePrefix}} -
     // an arbitrary-length, self-describing structure (any rank count, any
@@ -307,6 +310,11 @@ async function main() {
     await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS guild_id TEXT REFERENCES guilds(id) ON DELETE CASCADE;`);
     await client.query(`UPDATE tickets SET guild_id = $1 WHERE guild_id IS NULL;`, [DISCORD_GUILD_ID]);
     await client.query(`CREATE INDEX IF NOT EXISTS tickets_guild_id_idx ON tickets (guild_id);`);
+    // characters_link was never persisted at all before this (only held in
+    // the in-memory applications map, lost on every restart) - added here
+    // alongside custom_answers since both need the same treatment.
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS characters_link TEXT;`);
+    await client.query(`ALTER TABLE tickets ADD COLUMN IF NOT EXISTS custom_answers JSONB NOT NULL DEFAULT '[]'::jsonb;`);
 
     await client.query(`ALTER TABLE afk_sessions ADD COLUMN IF NOT EXISTS guild_id TEXT REFERENCES guilds(id) ON DELETE CASCADE;`);
     await client.query(`UPDATE afk_sessions SET guild_id = $1 WHERE guild_id IS NULL;`, [DISCORD_GUILD_ID]);

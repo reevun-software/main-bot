@@ -820,6 +820,22 @@ async function syncWarnRoles(member, warnCount) {
   if (roleId) await member.roles.add(roleId);
 }
 
+// What happens on a member's 3rd active warn - configurable per guild
+// (dashboard: Security page, "Роли варнов" block). Defaults to the
+// original hardcoded behavior (strip every role).
+async function applyThirdWarnPunishment(member, auditReason) {
+  const { warnPunishmentMode, warnPunishmentRoleId } = getGuildConfig(member.guild.id);
+  if (warnPunishmentMode === "kick") {
+    await member.kick(auditReason);
+  } else if (warnPunishmentMode === "ban") {
+    await member.ban({ reason: auditReason });
+  } else if (warnPunishmentMode === "assignRole" && warnPunishmentRoleId) {
+    await member.roles.set([warnPunishmentRoleId], auditReason);
+  } else {
+    await member.roles.set([], auditReason);
+  }
+}
+
 function applicationTitle(application) {
   return `Заявка на вступление | ${application.uid ?? "без UID"}`;
 }
@@ -831,6 +847,11 @@ function supportTicketTitle(ticket) {
 function buildApplicationMessagePayload(application, user = null) {
   const closed = ["accepted", "rejected", "closed"].includes(application.status);
   const value = (input) => String(input || "Не указано").slice(0, 500);
+  const answersText = application.customAnswers?.length
+    ? application.customAnswers.map((answer) => `**${answer.label}:** ${value(answer.value)}`).join("\n")
+    : `**OOC возраст:** ${value(application.oocAge)}\n` +
+      `**Почему хочет вступить:** ${value(application.reason)}\n` +
+      `**Ссылка на скриншот со списком персонажей:** ${value(application.charactersLink)}`;
   const container = new ContainerBuilder()
     .setAccentColor(0x000000)
     .addTextDisplayComponents(
@@ -848,9 +869,7 @@ function buildApplicationMessagePayload(application, user = null) {
         `**Кандидат:** ${user ? `${user.tag} · ` : ""}<@${application.userId}>\n` +
         `**Discord ID:** ${application.userId}\n` +
         `**IC имя / уровень / Static ID:** ${value(application.characterInfo)}\n` +
-        `**OOC возраст:** ${value(application.oocAge)}\n` +
-        `**Почему хочет вступить:** ${value(application.reason)}\n` +
-        `**Ссылка на скриншот со списком персонажей:** ${value(application.charactersLink)}`
+        answersText
       )
     )
     .addSeparatorComponents(
@@ -889,6 +908,22 @@ function embedToComponentPayload(embed, actionRows = []) {
   };
 }
 
+// Shared between the panel itself (always visible there) and the "О
+// системе" button's ephemeral reply (a quick-reference popup for anyone
+// who dismissed the panel text already).
+const APPLICATION_INFO_TEXT =
+  "### Что важно знать перед подачей\n" +
+  "• Заявки принимаются только для **Orlando / RU18**.\n" +
+  "• Возраст — **от 16 лет**, возможны исключения.\n" +
+  "• В среднем анкета рассматривается в течение **24 часов**.\n" +
+  "• Если нужный состав недоступен — набор в него временно закрыт.\n\n" +
+  "### После подачи заявки\n" +
+  "• Заявка будет направлена администрации на рассмотрение.\n" +
+  "• Следите за личными сообщениями и не закрывайте ЛС от сервера.\n" +
+  "• Отвечайте в анкете развёрнуто — это ускорит рассмотрение.\n\n" +
+  "### Повторная подача\n" +
+  "После отклонения новую заявку можно подать через **10 дней**.";
+
 // Department-driven: any department configured for this guild becomes an
 // application section (name, open/closed, everything editable from the
 // dashboard) - no more hardcoded Capt/RP. A guild with zero departments
@@ -926,11 +961,17 @@ async function buildApplicationPanel(guildId) {
     }
   } else {
     recruitmentStatus = `### Статус набора\n${applicationEmojiMention("unlock")} | Приём заявок открыт`;
-    actionComponent = new ButtonBuilder()
-      .setCustomId("application:start:general")
-      .setLabel("Подать заявку в семью")
-      .setEmoji(applicationEmoji("number_1"))
-      .setStyle(ButtonStyle.Secondary);
+    actionComponent = [
+      new ButtonBuilder()
+        .setCustomId("application:start:general")
+        .setLabel("Подать заявку в семью")
+        .setEmoji(applicationEmoji("number_1"))
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId("application:info")
+        .setLabel("О системе")
+        .setStyle(ButtonStyle.Secondary)
+    ];
   }
 
   const container = new ContainerBuilder()
@@ -953,33 +994,7 @@ async function buildApplicationPanel(guildId) {
       new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
     )
     .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(
-        "### Что важно знать перед подачей\n" +
-        "• Заявки принимаются только для **Orlando / RU18**.\n" +
-        "• Возраст — **от 16 лет**, возможны исключения.\n" +
-        "• В среднем анкета рассматривается в течение **24 часов**.\n" +
-        "• Если нужный состав недоступен — набор в него временно закрыт."
-      )
-    )
-    .addSeparatorComponents(
-      new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
-    )
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(
-        "### После подачи заявки\n" +
-        "• Заявка будет направлена администрации на рассмотрение.\n" +
-        "• Следите за личными сообщениями и не закрывайте ЛС от сервера.\n" +
-        "• Отвечайте в анкете развёрнуто — это ускорит рассмотрение."
-      )
-    )
-    .addSeparatorComponents(
-      new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
-    )
-    .addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(
-        "### Повторная подача\n" +
-        "После отклонения новую заявку можно подать через **10 дней**."
-      )
+      new TextDisplayBuilder().setContent(APPLICATION_INFO_TEXT)
     );
 
   if (actionComponent) {
@@ -987,7 +1002,7 @@ async function buildApplicationPanel(guildId) {
       .addSeparatorComponents(
         new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
       )
-      .addActionRowComponents(new ActionRowBuilder().addComponents(actionComponent));
+      .addActionRowComponents(new ActionRowBuilder().addComponents(...[].concat(actionComponent)));
   }
 
   return {
@@ -1233,7 +1248,13 @@ function isValidLinkUrl(rawUrl) {
 // departmentId is null for the generic (no-department) apply flow - the
 // modal's customId carries "general" in that slot instead of a real id, so
 // the submit handler downstream can tell the two apart.
-function buildApplicationModal(departmentId, departmentName) {
+// The IC-name/level/Static-ID field is always present and fixed - it's not
+// really a "question", it's the data buildFamilyNickname needs to set the
+// member's nickname on acceptance (see extractCharacterIdentity). That
+// leaves at most 4 of Discord's 5-field modal cap for a department's own
+// custom questions; a department with none configured gets the original
+// default 3 (screenshot link, OOC age, reason).
+function buildApplicationModal(departmentId, departmentName, questions = []) {
   const modal = new ModalBuilder()
     .setCustomId(modalCustomId("family_application", departmentId ?? "general"))
     .setTitle(`Заявка в ${departmentName}`.slice(0, 45));
@@ -1245,34 +1266,48 @@ function buildApplicationModal(departmentId, departmentName) {
     .setStyle(TextInputStyle.Short)
     .setRequired(true);
 
-  const oocAge = new TextInputBuilder()
-    .setCustomId("ooc_age")
-    .setLabel("OOC возраст")
-    .setPlaceholder("Укажите ваш реальный возраст")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true);
+  const rows = [new ActionRowBuilder().addComponents(character)];
+  const customQuestions = Array.isArray(questions) ? questions.slice(0, 4) : [];
 
-  const reason = new TextInputBuilder()
-    .setCustomId("reason")
-    .setLabel("Почему хотите вступить?")
-    .setPlaceholder("Расскажите, почему выбрали фаму и чем будете полезны")
-    .setStyle(TextInputStyle.Paragraph)
-    .setRequired(true);
+  if (customQuestions.length > 0) {
+    customQuestions.forEach((question, index) => {
+      const input = new TextInputBuilder()
+        .setCustomId(`q${index}`)
+        .setLabel(String(question.label).slice(0, 45))
+        .setStyle(question.style === "paragraph" ? TextInputStyle.Paragraph : TextInputStyle.Short)
+        .setRequired(question.required !== false);
+      rows.push(new ActionRowBuilder().addComponents(input));
+    });
+  } else {
+    const oocAge = new TextInputBuilder()
+      .setCustomId("ooc_age")
+      .setLabel("OOC возраст")
+      .setPlaceholder("Укажите ваш реальный возраст")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
 
-  const charactersLink = new TextInputBuilder()
-    .setCustomId("characters_link")
-    .setLabel("Ссылка на скриншот со списком персонажей")
-    .setPlaceholder("Например: сервис Yapix, Imgur и тому подобные")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true);
+    const reason = new TextInputBuilder()
+      .setCustomId("reason")
+      .setLabel("Почему хотите вступить?")
+      .setPlaceholder("Расскажите, почему выбрали фаму и чем будете полезны")
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true);
 
-  modal.addComponents(
-    new ActionRowBuilder().addComponents(character),
-    new ActionRowBuilder().addComponents(charactersLink),
-    new ActionRowBuilder().addComponents(oocAge),
-    new ActionRowBuilder().addComponents(reason)
-  );
+    const charactersLink = new TextInputBuilder()
+      .setCustomId("characters_link")
+      .setLabel("Ссылка на скриншот со списком персонажей")
+      .setPlaceholder("Например: сервис Yapix, Imgur и тому подобные")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
 
+    rows.push(
+      new ActionRowBuilder().addComponents(charactersLink),
+      new ActionRowBuilder().addComponents(oocAge),
+      new ActionRowBuilder().addComponents(reason)
+    );
+  }
+
+  modal.addComponents(...rows);
   return modal;
 }
 
@@ -2695,7 +2730,7 @@ async function handleInteraction(interaction) {
           if (count < 3) await syncWarnRoles(member, count);
           await dmUser(member, { embeds: [new EmbedBuilder().setColor(0x000000).setTitle("Получен варн").addFields({ name: "Причина", value: reason }, { name: "Всего варнов", value: `${count}/3` }, { name: "Администратор", value: `<@${interaction.user.id}>` })] });
           if (count >= 3) {
-            await member.roles.set([], `3/3 варнов. Выдал: ${interaction.user.tag}. Причина: ${reason}`);
+            await applyThirdWarnPunishment(member, `3/3 варнов. Выдал: ${interaction.user.tag}. Причина: ${reason}`);
           }
           completed.push(`<@${member.id}> — выдан варн **${count}/3**`);
           logLines.push(`<@${member.id}> — **${count}/3**`);
@@ -3012,6 +3047,11 @@ async function handleInteraction(interaction) {
     return;
   }
 
+  if (interaction.isButton() && interaction.customId === "application:info") {
+    await interaction.reply({ content: APPLICATION_INFO_TEXT, flags: MessageFlags.Ephemeral });
+    return;
+  }
+
   if (
     (interaction.isStringSelectMenu() && interaction.customId === "application:start") ||
     (interaction.isButton() && interaction.customId === "application:start:general")
@@ -3025,9 +3065,10 @@ async function handleInteraction(interaction) {
 
     let departmentId = null;
     let departmentName = "семью";
+    let department = null;
     if (interaction.isStringSelectMenu()) {
       departmentId = interaction.values[0];
-      const department = await getDepartmentById(interaction.guildId, departmentId);
+      department = await getDepartmentById(interaction.guildId, departmentId);
       if (!department?.recruitmentOpen) {
         await interaction.reply({
           content: noticeMessage("Этот состав сейчас закрыт для набора."),
@@ -3073,7 +3114,7 @@ async function handleInteraction(interaction) {
       }
     }
 
-    await interaction.showModal(buildApplicationModal(departmentId, departmentName));
+    await interaction.showModal(buildApplicationModal(departmentId, departmentName, department?.questions));
     if (interaction.isStringSelectMenu()) void resetApplicationPanel();
     return;
   }
@@ -3535,8 +3576,9 @@ async function handleInteraction(interaction) {
     const departmentIdRaw = interaction.customId.split(":")[1];
     const isGeneral = !departmentIdRaw || departmentIdRaw === "general";
     let departmentName = "семью";
+    let department = null;
     if (!isGeneral) {
-      const department = await getDepartmentById(interaction.guildId, departmentIdRaw);
+      department = await getDepartmentById(interaction.guildId, departmentIdRaw);
       if (!department) {
         await interaction.editReply({ content: errorMessage("Не удалось определить выбранный состав.") });
         return;
@@ -3587,19 +3629,27 @@ async function handleInteraction(interaction) {
       });
       return;
     }
-    const charactersLink = interaction.fields.getTextInputValue("characters_link").trim();
-    if (!isValidLinkUrl(charactersLink)) {
-      await interaction.editReply({
-        content: errorMessage("Укажите корректную ссылку на скриншот (начинается с http:// или https://).")
-      });
-      return;
+    const customQuestions = Array.isArray(department?.questions) ? department.questions.slice(0, 4) : [];
+    let oocAge = null;
+    let reason = null;
+    let charactersLink = null;
+    let customAnswers = null;
+    if (customQuestions.length > 0) {
+      customAnswers = customQuestions.map((question, index) => ({
+        label: question.label,
+        value: interaction.fields.getTextInputValue(`q${index}`)
+      }));
+    } else {
+      oocAge = interaction.fields.getTextInputValue("ooc_age");
+      reason = interaction.fields.getTextInputValue("reason");
+      charactersLink = interaction.fields.getTextInputValue("characters_link").trim();
+      if (!isValidLinkUrl(charactersLink)) {
+        await interaction.editReply({
+          content: errorMessage("Укажите корректную ссылку на скриншот (начинается с http:// или https://).")
+        });
+        return;
+      }
     }
-    const values = {
-      characterInfo,
-      oocAge: interaction.fields.getTextInputValue("ooc_age"),
-      reason: interaction.fields.getTextInputValue("reason"),
-      charactersLink
-    };
 
     await interaction.editReply({
       content: loadingMessage("Пожалуйста, подождите, ваша заявка создаётся...")
@@ -3617,10 +3667,11 @@ async function handleInteraction(interaction) {
       status: "new",
       requestType: isGeneral ? "general" : departmentIdRaw,
       departmentName,
-      characterInfo: values.characterInfo,
-      oocAge: values.oocAge,
-      reason: values.reason,
-      charactersLink: values.charactersLink,
+      characterInfo,
+      oocAge,
+      reason,
+      charactersLink,
+      customAnswers,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -3675,7 +3726,9 @@ async function handleInteraction(interaction) {
           { name: "UID", value: uid, inline: true },
           { name: "Состав", value: application.departmentName, inline: true },
           { name: "IC имя / уровень / Static ID", value: String(application.characterInfo).slice(0, 1024) },
-          { name: "OOC возраст", value: String(application.oocAge).slice(0, 1024), inline: true }
+          application.customAnswers?.length
+            ? { name: application.customAnswers[0].label, value: String(application.customAnswers[0].value).slice(0, 1024), inline: true }
+            : { name: "OOC возраст", value: String(application.oocAge).slice(0, 1024), inline: true }
         )
     );
 
