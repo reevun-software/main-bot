@@ -943,8 +943,15 @@ const SCAM_LINK_PATTERNS = [
   /dlscord\.|discorcl\.|discrod\./i
 ];
 
+// Collapsing repeated `*` before expanding to `.*` blocks the classic
+// catastrophic-backtracking shape (adjacent .* groups against a long
+// non-matching candidate) - these patterns are admin-authored via the
+// dashboard, not attacker input, but a bad one would otherwise hang the
+// whole bot's event loop on every message. ponytail: length-capped, not a
+// full ReDoS-safe glob engine - revisit if patterns get more elaborate.
 function globToRegExp(pattern) {
-  const escaped = pattern.trim().replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  const collapsed = pattern.trim().slice(0, 200).replace(/\*+/g, "*");
+  const escaped = collapsed.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
   return new RegExp(escaped, "i");
 }
 
