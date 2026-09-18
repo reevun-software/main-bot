@@ -289,6 +289,12 @@ async function handleApiRequest(client, req, res, url) {
   const resource = segments[3];
   const rest = segments.slice(4);
 
+  // Every route below is scoped to a specific guild by id - validate it's
+  // one the bot is actually in up front, rather than each handler silently
+  // reading/writing rows for a guild that doesn't (or no longer) exists.
+  const guild = client.guilds.cache.get(guildId);
+  if (!guild) return sendJson(res, 404, { error: "Bot is not in that guild" });
+
   if (resource === "config") return handleConfig(client, req, res, guildId);
   if (resource === "bans" && rest.length === 0) return handleBans(req, res, guildId);
   if (resource === "bans" && rest.length === 1 && req.method === "DELETE") {
@@ -302,13 +308,13 @@ async function handleApiRequest(client, req, res, url) {
 
   if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
 
-  if (resource === "members") return sendJson(res, 200, await getGuildMembersForApi(guildId));
+  if (resource === "members") {
+    const memberIds = [...guild.members.cache.values()].filter((m) => !m.user.bot).map((m) => m.id);
+    return sendJson(res, 200, await getGuildMembersForApi(memberIds));
+  }
   if (resource === "audit-log") return sendJson(res, 200, await getAuditLogForGuild(guildId, Number(url.searchParams.get("limit")) || 50));
   if (resource === "afk-sessions") return sendJson(res, 200, await getAfkSessionsForApi(guildId));
   if (resource === "tickets") return sendJson(res, 200, await getTicketsForGuild(guildId, url.searchParams.get("category") || undefined));
-
-  const guild = client.guilds.cache.get(guildId);
-  if (!guild) return sendJson(res, 404, { error: "Bot is not in that guild" });
 
   if (resource === "roles") return sendJson(res, 200, [...guild.roles.cache.values()].map(roleSummary));
   if (resource === "channels") {

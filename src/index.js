@@ -2502,11 +2502,18 @@ async function handleGuildMemberAdd(member) {
   const bans = await getBansForGuild(member.guild.id).catch(() => []);
   const matchedBan = bans.find((ban) => ban.discordUserId === member.id);
   if (matchedBan) {
-    await member.ban({
-      reason: `Пользователь находится в чёрном списке (совпадение: запись #${matchedBan.id})`
-    }).catch((error) => {
+    try {
+      await member.ban({
+        reason: `Пользователь находится в чёрном списке (совпадение: запись #${matchedBan.id})`
+      });
+    } catch (error) {
       console.error(`[${member.guild.id}] Не удалось забанить участника ${member.id} из чёрного списка:`, error);
-    });
+      await sendLog(member.guild, new EmbedBuilder()
+        .setColor(0xeb5757)
+        .setTitle("Не удалось забанить участника из чёрного списка")
+        .setDescription(`<@${member.id}> совпал с записью чёрного списка #${matchedBan.id} при входе, но бан не прошёл — проверьте права бота и иерархию ролей.`)
+      ).catch(() => null);
+    }
     return;
   }
 
@@ -3234,6 +3241,11 @@ async function handleInteraction(interaction) {
       });
       return;
     }
+    // Claim synchronously, before the first await below - closes the race
+    // where two admins click almost simultaneously and both pass the check
+    // above before either had a chance to set claimedBy, ending up with
+    // both running the full close flow (duplicate DMs/log entries).
+    ticket.claimedBy = interaction.user.id;
 
     if (ticket.requestType === "rank_change") {
       const member = interaction.guild.members.cache.get(ticket.userId)
@@ -3296,6 +3308,7 @@ async function handleInteraction(interaction) {
       });
       return;
     }
+    ticket.claimedBy = interaction.user.id;
 
     const conditionMet = interaction.fields.getStringSelectValues("condition_met")[0] === "yes";
 
@@ -3366,6 +3379,7 @@ async function handleInteraction(interaction) {
       });
       return;
     }
+    ticket.claimedBy = interaction.user.id;
 
     const isYes = (fieldId) => interaction.fields.getStringSelectValues(fieldId)[0] === "yes";
     const checklist = [
@@ -3556,6 +3570,12 @@ async function handleInteraction(interaction) {
       });
       return;
     }
+    // Claim synchronously, before the first await below - closes the race
+    // where two admins click "Принять" almost simultaneously and both pass
+    // the check above before either had a chance to set claimedBy, ending
+    // up with both running the full accept flow (duplicate roles/DMs/audit
+    // entries).
+    application.claimedBy = interaction.user.id;
 
     await interaction.deferUpdate();
     const applications = getApplications();
@@ -4041,11 +4061,18 @@ async function handleInteraction(interaction) {
       ban.characterName && ban.characterName.trim().toLowerCase() === characterParts[0].toLowerCase()
     );
     if (matchedBan) {
-      await interaction.member.ban({
-        reason: `Пользователь находится в чёрном списке (совпадение: запись #${matchedBan.id})`
-      }).catch((error) => {
+      try {
+        await interaction.member.ban({
+          reason: `Пользователь находится в чёрном списке (совпадение: запись #${matchedBan.id})`
+        });
+      } catch (error) {
         console.error(`[${interaction.guildId}] Не удалось забанить участника ${interaction.user.id} из чёрного списка (по имени персонажа):`, error);
-      });
+        await sendLog(interaction.guild, new EmbedBuilder()
+          .setColor(0xeb5757)
+          .setTitle("Не удалось забанить участника из чёрного списка")
+          .setDescription(`<@${interaction.user.id}> подал заявку с именем персонажа из записи чёрного списка #${matchedBan.id}, но бан не прошёл — проверьте права бота и иерархию ролей.`)
+        ).catch(() => null);
+      }
       await interaction.editReply({
         content: errorMessage("Вступление в семью запрещено: указанный персонаж находится в чёрном списке.")
       });

@@ -134,15 +134,25 @@ async function initStorage() {
   console.log(tls?.cipher ? `Postgres storage connected with TLS (${tls.cipher}).` : "Postgres storage connected (private network, no TLS).");
 }
 
+// Clears every state map IN PLACE rather than replacing them with new
+// object literals. getApplications()/getSupportTickets()/etc hand out the
+// live object by reference, not a copy - a handler that grabbed one,
+// awaited something (fetching a member, assigning roles), and only then
+// calls saveApplications(...) is still working with that same reference.
+// Swapping in a new object here would orphan it: the handler's eventual
+// save() would overwrite the entire table with its now-stale snapshot,
+// silently discarding anything written by other handlers via the new
+// object in between. Clearing in place keeps every outstanding reference
+// valid across a reload.
 function resetState() {
-  state.applications = {};
-  state.guildConfigs = {};
-  state.guildSecuritySettings = {};
-  state.automodFilterConfigs = {};
-  state.ranks = {};
-  state.supportTickets = {};
-  state.users = {};
-  state.warnings = {};
+  for (const key of Object.keys(state.applications)) delete state.applications[key];
+  for (const key of Object.keys(state.guildConfigs)) delete state.guildConfigs[key];
+  for (const key of Object.keys(state.guildSecuritySettings)) delete state.guildSecuritySettings[key];
+  for (const key of Object.keys(state.automodFilterConfigs)) delete state.automodFilterConfigs[key];
+  for (const key of Object.keys(state.ranks)) delete state.ranks[key];
+  for (const key of Object.keys(state.supportTickets)) delete state.supportTickets[key];
+  for (const key of Object.keys(state.users)) delete state.users[key];
+  for (const key of Object.keys(state.warnings)) delete state.warnings[key];
 }
 
 function reloadStorage() {
@@ -157,7 +167,6 @@ function reloadStorage() {
 
 async function loadState() {
   const { rows: guildConfigRows } = await pool.query("SELECT * FROM guild_config");
-  state.guildConfigs = {};
   for (const row of guildConfigRows) {
     state.guildConfigs[row.guild_id] = {
       leadershipRoleIds: row.leadership_role_ids ?? [],
@@ -184,7 +193,6 @@ async function loadState() {
   }
 
   const { rows: securityRows } = await pool.query("SELECT * FROM guild_security_settings");
-  state.guildSecuritySettings = {};
   for (const row of securityRows) {
     state.guildSecuritySettings[row.guild_id] = {
       moderatorRoleIds: row.moderator_role_ids ?? [],
@@ -203,7 +211,6 @@ async function loadState() {
   }
 
   const { rows: automodRows } = await pool.query("SELECT * FROM automod_filter_config");
-  state.automodFilterConfigs = {};
   for (const row of automodRows) {
     state.automodFilterConfigs[row.guild_id] ??= {};
     state.automodFilterConfigs[row.guild_id][row.filter_type] = {
@@ -585,14 +592,21 @@ function updateGuildConfig(guildId, patch) {
 // dashboard wants this guild's current data on every request rather than
 // whatever was loaded at last boot/reload.
 
-async function getGuildMembersForApi(guildId) {
+// guild_members was a one-time snapshot taken during the multi-tenant
+// migration and never updated again since - rank/warning changes are
+// actually written to `users` (see the rank/warning update queries
+// below), so it went stale the moment anyone's rank or warnings changed,
+// and a member who joined after the migration never got a row there at
+// all. The API route passes the guild's LIVE Discord.js member id list
+// (guild.members.cache) so this reads current data, scoped to whoever is
+// actually in that guild right now, instead of a frozen table.
+async function getGuildMembersForApi(discordIds) {
+  if (!discordIds.length) return [];
   const { rows } = await pool.query(
-    `SELECT gm.discord_id, u.username, gm.current_rank, gm.active_warnings, gm.total_warnings
-     FROM guild_members gm
-     LEFT JOIN users u ON u.discord_id = gm.discord_id
-     WHERE gm.guild_id = $1
-     ORDER BY gm.current_rank DESC NULLS LAST, u.username`,
-    [guildId]
+    `SELECT discord_id, username, current_rank, active_warnings, total_warnings
+     FROM users WHERE discord_id = ANY($1)
+     ORDER BY current_rank DESC NULLS LAST, username`,
+    [discordIds]
   );
   return rows.map((row) => ({
     discordId: row.discord_id,
