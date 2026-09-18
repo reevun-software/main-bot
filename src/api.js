@@ -128,7 +128,7 @@ function channelSummary(channel) {
   return { id: channel.id, name: channel.name, type: channel.type };
 }
 
-async function handleConfig(client, req, res, guildId) {
+async function handleConfig(req, res, guildId, guild, onConfigChanged) {
   if (req.method === "GET") return sendJson(res, 200, getGuildConfig(guildId));
   if (req.method === "PUT") {
     let body;
@@ -142,7 +142,9 @@ async function handleConfig(client, req, res, guildId) {
       if (PATCHABLE_CONFIG_FIELDS.has(key)) patch[key] = body[key];
     }
     if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No recognized fields in body" });
-    return sendJson(res, 200, await updateGuildConfig(guildId, patch));
+    const result = await updateGuildConfig(guildId, patch);
+    onConfigChanged?.(guild).catch((error) => console.error(`[${guildId}] Panel refresh after config change failed:`, error));
+    return sendJson(res, 200, result);
   }
   return sendJson(res, 405, { error: "Method not allowed" });
 }
@@ -164,7 +166,7 @@ async function handleBans(req, res, guildId) {
   return sendJson(res, 405, { error: "Method not allowed" });
 }
 
-async function handleDepartments(req, res, guildId, departmentId) {
+async function handleDepartments(req, res, guildId, departmentId, guild, onConfigChanged) {
   if (departmentId) {
     if (req.method === "PATCH") {
       let body;
@@ -190,10 +192,12 @@ async function handleDepartments(req, res, guildId, departmentId) {
       if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No recognized fields in body" });
       const updated = await updateDepartmentForGuild(guildId, departmentId, patch);
       if (!updated) return sendJson(res, 404, { error: "Department not found" });
+      onConfigChanged?.(guild).catch((error) => console.error(`[${guildId}] Panel refresh after department change failed:`, error));
       return sendJson(res, 200, updated);
     }
     if (req.method === "DELETE") {
       await deleteDepartmentForGuild(guildId, departmentId);
+      onConfigChanged?.(guild).catch((error) => console.error(`[${guildId}] Panel refresh after department change failed:`, error));
       res.writeHead(204).end();
       return;
     }
@@ -210,7 +214,9 @@ async function handleDepartments(req, res, guildId, departmentId) {
     }
     const name = String(body.name ?? "").trim();
     if (!name) return sendJson(res, 400, { error: "name is required" });
-    return sendJson(res, 201, await createDepartmentForGuild(guildId, name));
+    const created = await createDepartmentForGuild(guildId, name);
+    onConfigChanged?.(guild).catch((error) => console.error(`[${guildId}] Panel refresh after department change failed:`, error));
+    return sendJson(res, 201, created);
   }
   return sendJson(res, 405, { error: "Method not allowed" });
 }
@@ -263,7 +269,7 @@ async function handleAutomod(req, res, guildId, filterType) {
   return sendJson(res, 200, getAutomodFilterConfigsForGuild(guildId));
 }
 
-async function handleApiRequest(client, req, res, url) {
+async function handleApiRequest(client, req, res, url, onConfigChanged) {
   if (!isAuthorized(req)) return sendJson(res, 401, { error: "Unauthorized" });
 
   const segments = url.pathname.split("/").filter(Boolean); // ["api", "guilds", ":id", resource, ...rest]
@@ -295,14 +301,16 @@ async function handleApiRequest(client, req, res, url) {
   const guild = client.guilds.cache.get(guildId);
   if (!guild) return sendJson(res, 404, { error: "Bot is not in that guild" });
 
-  if (resource === "config") return handleConfig(client, req, res, guildId);
+  if (resource === "config") return handleConfig(req, res, guildId, guild, onConfigChanged);
   if (resource === "bans" && rest.length === 0) return handleBans(req, res, guildId);
   if (resource === "bans" && rest.length === 1 && req.method === "DELETE") {
     await removeBanForGuild(guildId, rest[0]);
     res.writeHead(204).end();
     return;
   }
-  if (resource === "departments" && rest.length <= 1) return handleDepartments(req, res, guildId, rest[0]);
+  if (resource === "departments" && rest.length <= 1) {
+    return handleDepartments(req, res, guildId, rest[0], guild, onConfigChanged);
+  }
   if (resource === "security") return handleSecurity(req, res, guildId);
   if (resource === "automod" && rest.length <= 1) return handleAutomod(req, res, guildId, rest[0]);
 
@@ -324,7 +332,10 @@ async function handleApiRequest(client, req, res, url) {
   return sendJson(res, 404, { error: "Not found" });
 }
 
-function startApiAndHealthServer(client) {
+// onConfigChanged(guild): called (fire-and-forget by the callers above)
+// after a site-initiated config or department write, so the bot's
+// already-posted panel messages repaint without waiting for a restart.
+function startApiAndHealthServer(client, onConfigChanged) {
   const port = Number(process.env.PORT) || 3000;
   http.createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
@@ -334,7 +345,7 @@ function startApiAndHealthServer(client) {
       return;
     }
     if (url.pathname.startsWith("/api/")) {
-      handleApiRequest(client, req, res, url).catch((error) => {
+      handleApiRequest(client, req, res, url, onConfigChanged).catch((error) => {
         console.error("API request failed:", error);
         sendJson(res, 500, { error: "Internal error" });
       });

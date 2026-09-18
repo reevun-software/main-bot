@@ -1185,6 +1185,17 @@ const APPLICATION_INFO_TEXT =
   "### Повторная подача\n" +
   "После отклонения новую заявку можно подать через **10 дней**.";
 
+// The "О системе" button - explains how review actually works, for
+// someone who's never dealt with the bot before. Deliberately no
+// technical detail (channels, buttons, statuses) - just what happens and
+// in what order.
+const APPLICATION_SYSTEM_INFO_TEXT =
+  "### Как проходит рассмотрение\n" +
+  "После отправки анкеты для вас откроется отдельный приватный канал — там с вами будет общаться администрация.\n\n" +
+  "Кто-то из ответственных возьмёт вашу заявку в работу и изучит анкету. Если появятся вопросы — их зададут прямо в этом канале.\n\n" +
+  "По итогу вы получите решение личным сообщением от бота: заявку либо примут — тогда вам выдадут роль и никнейм семьи, либо отклонят с указанием причины.\n\n" +
+  "Пока заявка на рассмотрении, подавать повторную не нужно — дождитесь ответа.";
+
 // Department-driven: any department configured for this guild becomes an
 // application section (name, open/closed, everything editable from the
 // dashboard) - no more hardcoded Capt/RP. A guild with zero departments
@@ -1225,11 +1236,12 @@ async function buildApplicationPanel(guildId) {
       new ButtonBuilder()
         .setCustomId("application:start:general")
         .setLabel("Подать заявку в семью")
-        .setEmoji(applicationEmoji("number_1"))
+        .setEmoji(applicationEmoji("recruitment"))
         .setStyle(ButtonStyle.Secondary),
       new ButtonBuilder()
         .setCustomId("application:info")
         .setLabel("О системе")
+        .setEmoji(applicationEmoji("notice"))
         .setStyle(ButtonStyle.Secondary)
     ];
   }
@@ -1876,6 +1888,34 @@ async function refreshStaticPanel(guild, channelId, componentId, payloadBuilder)
     await current.delete().catch(() => null);
   }
   return channel.send(payloadBuilder(guild.id));
+}
+
+// Config edits made through the dashboard update the bot's in-memory
+// config immediately (updateGuildConfig writes state.guildConfigs
+// synchronously), so anything read fresh on the next interaction already
+// sees the new value. But the panel messages already sitting in Discord
+// (application/support/admin) don't repaint themselves - they only used
+// to get regenerated on bot startup. Called (fire-and-forget) after any
+// site-initiated config or department write, so a color/department/
+// channel change shows up on the already-posted panels within seconds
+// instead of needing a restart or a manual click to force a re-render.
+async function refreshGuildPanels(guild) {
+  const { applicationPanelChannelId, supportPanelChannelId, adminPanelChannelId } = getGuildConfig(guild.id);
+  if (applicationPanelChannelId) {
+    await refreshApplicationPanel(guild).catch((error) => {
+      console.error(`[${guild.id}] Не удалось обновить панель заявок:`, error);
+    });
+  }
+  if (supportPanelChannelId) {
+    await refreshStaticPanel(guild, supportPanelChannelId, "support:create", buildSupportPanel).catch((error) => {
+      console.error(`[${guild.id}] Не удалось обновить панель поддержки:`, error);
+    });
+  }
+  if (adminPanelChannelId) {
+    await refreshStaticPanel(guild, adminPanelChannelId, "admin:warn", buildAdminPanel).catch((error) => {
+      console.error(`[${guild.id}] Не удалось обновить админ-панель:`, error);
+    });
+  }
 }
 
 async function processExpiredGameAfkSessions(guild) {
@@ -3468,7 +3508,7 @@ async function handleInteraction(interaction) {
   }
 
   if (interaction.isButton() && interaction.customId === "application:info") {
-    await interaction.reply({ content: APPLICATION_INFO_TEXT, flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: APPLICATION_SYSTEM_INFO_TEXT, flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -4215,7 +4255,7 @@ if (!DISCORD_TOKEN) {
 
 async function startBot() {
   await initStorage();
-  startApiAndHealthServer(client);
+  startApiAndHealthServer(client, refreshGuildPanels);
   await client.login(DISCORD_TOKEN);
 }
 
