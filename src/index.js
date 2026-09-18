@@ -3941,6 +3941,7 @@ async function handleInteraction(interaction) {
       });
       return;
     }
+    application.claimedBy = interaction.user.id;
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     await interaction.editReply({
@@ -3949,7 +3950,6 @@ async function handleInteraction(interaction) {
     const reason = interaction.fields.getTextInputValue("reason").trim();
     const applications = getApplications();
     application.status = "rejected";
-    application.claimedBy ??= interaction.user.id;
     application.closedBy = interaction.user.id;
     application.closedAt = new Date().toISOString();
     application.updatedAt = application.closedAt;

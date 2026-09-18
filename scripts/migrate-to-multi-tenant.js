@@ -256,14 +256,12 @@ async function main() {
       );
     }
 
-    // 2. Backfill guild_members from the existing single-tenant users table
-    // (rank/warning columns stay on `users` too for now - dropped in a
-    // later migration once bot code no longer reads them from there).
-    await client.query(`
-      INSERT INTO guild_members (guild_id, discord_id, current_rank, active_warnings, total_warnings, updated_at)
-      SELECT $1, discord_id, current_rank, active_warnings, total_warnings, updated_at FROM users
-      ON CONFLICT (guild_id, discord_id) DO NOTHING;
-    `, [DISCORD_GUILD_ID]);
+    // guild_members used to get backfilled here from `users` as a
+    // per-guild rank/warning snapshot, but nothing ever read it back - the
+    // bot's actual rank/warning lookups stayed on `users` (see
+    // getGuildMembersForApi in storage.js). The snapshot only went stale
+    // the moment anyone's rank or warnings changed after the migration
+    // ran once. Removed; the table itself is left as dead but harmless.
 
     // 3. Add nullable guild_id to existing single-tenant tables and
     // backfill it - NOT NULL / PK changes land in a follow-up migration
