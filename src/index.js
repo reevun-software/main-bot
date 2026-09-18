@@ -4195,13 +4195,9 @@ async function handleInteraction(interaction) {
       ? await interaction.guild.channels.fetch(applicationsChannelId).catch(() => null)
       : null;
     if (applicationsChannel?.isTextBased() && applicationsChannel.id !== channel.id) {
-      const { leadershipRoleIds } = getGuildConfig(interaction.guildId);
-      const mentions = leadershipRoleIds.map((roleId) => `<@&${roleId}>`).join(" ");
-      const announcement = await applicationsChannel.send({
-        content: noticeMessage(`Новая заявка в **${application.departmentName}** **${uid}**: ${channel}`) +
-          (mentions ? `\n${mentions}` : ""),
-        allowedMentions: { roles: [...leadershipRoleIds] }
-      });
+      const announcement = await applicationsChannel.send(
+        noticeMessage(`Новая заявка в **${application.departmentName}** **${uid}**: ${channel}`)
+      );
       const latestApplications = getApplications();
       if (latestApplications[applicationKey]?.channelId === channel.id) {
         latestApplications[applicationKey].announcementChannelId = applicationsChannel.id;
