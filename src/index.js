@@ -1191,10 +1191,10 @@ const APPLICATION_INFO_TEXT =
 // in what order.
 const APPLICATION_SYSTEM_INFO_TEXT =
   "### Как проходит рассмотрение\n" +
-  "После отправки анкеты для вас откроется отдельный приватный канал — там с вами будет общаться администрация.\n\n" +
-  "Кто-то из ответственных возьмёт вашу заявку в работу и изучит анкету. Если появятся вопросы — их зададут прямо в этом канале.\n\n" +
-  "По итогу вы получите решение личным сообщением от бота: заявку либо примут — тогда вам выдадут роль и никнейм семьи, либо отклонят с указанием причины.\n\n" +
-  "Пока заявка на рассмотрении, подавать повторную не нужно — дождитесь ответа.";
+  "После отправки анкеты для вас откроется отдельный приватный канал. Там с вами будет общаться администрация.\n\n" +
+  "Кто-то из ответственных возьмёт вашу заявку в работу и изучит анкету. Если появятся вопросы, их зададут прямо в этом канале.\n\n" +
+  "По итогу вы получите решение личным сообщением от бота. Заявку либо примут (тогда вам выдадут роль и никнейм семьи), либо отклонят с указанием причины.\n\n" +
+  "Пока заявка на рассмотрении, подавать повторную не нужно. Просто дождитесь ответа.";
 
 // Department-driven: any department configured for this guild becomes an
 // application section (name, open/closed, everything editable from the
@@ -4195,9 +4195,13 @@ async function handleInteraction(interaction) {
       ? await interaction.guild.channels.fetch(applicationsChannelId).catch(() => null)
       : null;
     if (applicationsChannel?.isTextBased() && applicationsChannel.id !== channel.id) {
-      const announcement = await applicationsChannel.send(
-        noticeMessage(`Новая заявка в **${application.departmentName}** **${uid}**: ${channel}`)
-      );
+      const { leadershipRoleIds } = getGuildConfig(interaction.guildId);
+      const mentions = leadershipRoleIds.map((roleId) => `<@&${roleId}>`).join(" ");
+      const announcement = await applicationsChannel.send({
+        content: noticeMessage(`Новая заявка в **${application.departmentName}** **${uid}**: ${channel}`) +
+          (mentions ? `\n${mentions}` : ""),
+        allowedMentions: { roles: [...leadershipRoleIds] }
+      });
       const latestApplications = getApplications();
       if (latestApplications[applicationKey]?.channelId === channel.id) {
         latestApplications[applicationKey].announcementChannelId = applicationsChannel.id;
